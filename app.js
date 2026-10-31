@@ -1,580 +1,618 @@
+/* 《雨后的线索：校园小侦探》—— 主程序：场景切换、互动、计时器、白奶奶通话 */
 (function () {
   'use strict';
-  const CFG = window.CFG, Art = window.Art, Snd = window.Snd;
+  const CFG = window.CFG, Snd = window.Snd, Art = window.Art;
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
   const stage = $('#stage');
   const IW = 1367, IH = 768;
-  const state = { cur: null, base: null, found: new Set(), popped: new Set(), boardLevel: 0, timer: null, musicManual: null };
-  const scenes = {};
-  const NUM = ['①', '②', '③', '④'];
-  const ORDER = [
-    ['start', '1 开始页'], ['desk', '2 书桌'], ['notebook', '3 案件前情'], ['scene', '4 现场搜证'],
-    ['call1', '5 白奶奶来电'], ['group', '6 小组讨论·监控'], ['meeting', '7 推理会议'], ['deskPhone', '8 回到书桌·手机'],
-    ['call2', '8 视频汇报'], ['map', '8 校园地图'], ['reveal', '8 真相揭晓'], ['review', '9 笔记本回顾']
-  ];
+  const SX = 1920 / IW, SY = 1080 / IH;
+  const state = { cur: null, base: null, found: new Set(), boardAll: false, callShown: false, cctvSeen: new Set(), reviewStep: 0 };
+  const SC = {};
+  const ORDER = ['start', 'desk', 'notebook', 'scene', 'call1', 'group', 'meeting', 'deskPhone', 'call2', 'map', 'reveal', 'review'];
+  const NAMES = { start: '1 开始页', desk: '2 书桌（笔记本合上）', notebook: '3 案件前情 → 前往现场', scene: '4 现场搜证', call1: '5 白奶奶来电',
+    group: '6 小组讨论 · 监控', meeting: '7 推理会议', deskPhone: '8a 书桌 · 手机', call2: '8b 视频汇报白奶奶', map: '8c 校园地图', reveal: '8d 真相揭晓时刻', review: '9 笔记本回顾 · 盖章 · 新案件' };
 
-  /* ---------- 小工具 ---------- */
-  function h(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
-  function crop(c, ar) {
-    const w = c.w, hh = w / ar;
-    const x0 = Math.min(Math.max(c.cx - w / 2, 0), IW - w), y0 = Math.min(Math.max(c.cy - hh / 2, 0), IH - hh);
-    return `background-image:url(assets/img/scene.jpg);background-size:${IW / w * 100}% auto;background-position:${x0 / (IW - w) * 100}% ${y0 / (IH - hh) * 100}%`;
-  }
-  function addScene(id, cls, html) {
-    const el = document.createElement('section');
-    el.className = 'scene ' + (cls || ''); el.id = 's-' + id; if (html) el.innerHTML = html;
-    stage.appendChild(el); return el;
-  }
-  function camFrame(idx) {
-    const id = CFG.cams[idx].id;
-    if (id === 'garden') return `<div style="width:100%;height:100%;${crop({ cx: 600, cy: 400, w: 980 }, 4 / 3)}"></div>`;
-    return Art.cam(id);
-  }
-  function peel(host, rect, mid) {
-    const p = document.createElement('div'); p.className = 'peel';
-    Object.assign(p.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px', transform: 'rotateY(0deg)', transition: 'transform .8s ease-in-out,opacity .3s' });
-    host.style.perspective = '2600px'; host.appendChild(p);
-    Snd.sfx.page();
-    requestAnimationFrame(() => requestAnimationFrame(() => { p.style.transform = 'rotateY(-176deg)'; }));
-    setTimeout(mid, 380); setTimeout(() => { p.style.opacity = 0; }, 760); setTimeout(() => p.remove(), 1100);
-  }
-  function holdBtn(el, ms, cb) {
-    const bar = el.querySelector('.fillbar'); let t0 = 0, raf = 0, down = false;
-    const loop = () => { if (!down) return; const p = Math.min(1, (performance.now() - t0) / ms); bar.style.width = p * 100 + '%'; if (p >= 1) { down = false; bar.style.width = '0'; cb(); return; } raf = requestAnimationFrame(loop); };
-    el.addEventListener('pointerdown', e => { e.preventDefault(); Snd.init(); down = true; t0 = performance.now(); loop(); });
-    const up = () => { down = false; cancelAnimationFrame(raf); bar.style.width = '0'; };
-    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => el.addEventListener(ev, up));
-  }
-  function petalsLayer(n, host) {
-    const cols = ['#ee86a0', '#f5a964', '#f6c1d0', '#c9a7e0'];
-    for (let i = 0; i < n; i++) {
-      const p = document.createElement('div'); p.className = 'petal';
-      const s = 20 + Math.random() * 22;
-      p.style.cssText = `left:${Math.random() * 100}%;width:${s}px;height:${s * .6}px;background:${cols[i % 4]};border-radius:60% 40% 60% 40%;opacity:.85;--dx:${(Math.random() - .5) * 300}px;animation-duration:${9 + Math.random() * 9}s;animation-delay:${-Math.random() * 14}s`;
-      host.appendChild(p);
+  function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
+  function safe(fn) { try { return fn(); } catch (e) { return null; } }
+  /* 把一个 w×h 的方块贴到图片里斜放的四边形上（TL,TR,BR,BL），用来把“来电画面”贴进手机屏幕 */
+  function quadMatrix(w, h, q) {
+    const src = [[0, 0], [w, 0], [w, h], [0, h]], A = [], B = [];
+    for (let i = 0; i < 4; i++) { const [x, y] = src[i], [X, Y] = q[i]; A.push([x, y, 1, 0, 0, 0, -X * x, -X * y]); B.push(X); A.push([0, 0, 0, x, y, 1, -Y * x, -Y * y]); B.push(Y); }
+    for (let c = 0; c < 8; c++) {
+      let m = c; for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[m][c])) m = r;
+      [A[c], A[m]] = [A[m], A[c]]; [B[c], B[m]] = [B[m], B[c]];
+      for (let r = 0; r < 8; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k]; B[r] -= f * B[c]; }
     }
+    const v = B.map((b, i) => b / A[i][i]);
+    return `matrix3d(${v[0]},${v[3]},0,${v[6]},${v[1]},${v[4]},0,${v[7]},0,0,1,0,${v[2]},${v[5]},0,1)`;
   }
 
-  /* ---------- 白奶奶：朗读与表情 ---------- */
-  const Voice = {
-    voice: null, cur: null,
-    init() {
-      if (!('speechSynthesis' in window)) return;
-      const pick = () => {
-        const vs = speechSynthesis.getVoices();
-        this.voice = vs.find(v => /zh[-_]CN/i.test(v.lang) && /Xiaoxiao|Xiaoyi|Yunxi|Huihui|Yaoyao|Tingting|Meijia|Google/i.test(v.name)) || vs.find(v => /zh[-_]CN|cmn/i.test(v.lang)) || vs.find(v => /^zh/i.test(v.lang)) || null;
-      };
-      pick(); speechSynthesis.onvoiceschanged = pick;
-    },
-    cancel() { try { speechSynthesis.cancel(); } catch (e) {} if (this.cur) { try { this.cur.pause(); } catch (e) {} this.cur = null; } },
-    speak(line, onend) {
-      this.cancel();
-      let done = false; const fin = () => { if (!done) { done = true; clearTimeout(tm); onend && onend(); } };
-      const tm = setTimeout(fin, line.t.length * 420 + 2500);
-      const tts = () => {
-        if (!('speechSynthesis' in window)) return;
-        const u = new SpeechSynthesisUtterance(line.t); u.lang = 'zh-CN'; if (this.voice) u.voice = this.voice;
-        u.rate = .88; u.pitch = 1.0; u.onend = fin; u.onerror = fin; speechSynthesis.speak(u);
-      };
-      if (line.audio) { const a = new Audio(line.audio); this.cur = a; a.onended = fin; a.onerror = tts; a.play().catch(tts); } else tts();
-    }
-  };
-  const EMO = { happy: '♪', puzzled: '？', surprised: '！', thanks: '♥' };
-  function sayIn(ui, line) {
-    clearTimeout(ui.subT);
-    ui.sub.textContent = line.t; ui.sub.classList.add('on');
-    const e = line.e || 'happy';
-    ui.react.textContent = EMO[e] || '♪'; ui.react.classList.add('on');
-    ui.react.style.color = e === 'puzzled' ? '#4c6a86' : e === 'surprised' ? '#e5604b' : e === 'thanks' ? '#e9718a' : '#7fa86a';
-    ui.img.className = 'gimg ' + (e === 'puzzled' || e === 'surprised' ? e : 'talk');
-    Snd.sfx.click();
-    Voice.speak(line, () => {
-      ui.img.className = 'gimg idle'; ui.react.classList.remove('on');
-      ui.subT = setTimeout(() => ui.sub.classList.remove('on'), 5000);
-    });
+  /* ---------- 舞台缩放：固定 16:9，自动适配电视/投影 ---------- */
+  function fit() {
+    const v = $('#viewport'); const s = Math.min(v.clientWidth / 1920, v.clientHeight / 1080);
+    stage.style.transform = `translate(-50%,-50%) scale(${s})`;
   }
-  function stopSay(ui) { Voice.cancel(); if (ui) { ui.sub.classList.remove('on'); ui.react.classList.remove('on'); ui.img.className = 'gimg idle'; } }
+  addEventListener('resize', fit); fit();
 
-  /* ---------- 计时器 ---------- */
-  function makeTimer(host, secs, left) {
-    const C = 2 * Math.PI * 42;
-    const el = h(`<div class="timer"><svg class="ringsvg" viewBox="0 0 100 100"><circle class="bgc" cx="50" cy="50" r="42"/><circle class="fgc" cx="50" cy="50" r="42" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg><div class="tm">00:00</div><div class="tcs"><div class="row"><button data-a="toggle">▶ 开始</button><button data-a="reset">↺</button></div><div class="row"><button data-a="minus">−1分</button><button data-a="plus">＋1分</button></div></div></div>`);
-    const end = h('<div class="bubbleEnd">时间到啦！</div>');
-    if (left) el.classList.add('tleft');
-    host.appendChild(el); host.appendChild(end);
-    const tm = $('.tm', el), fg = $('.fgc', el), tg = $('[data-a=toggle]', el);
-    let total = secs, remain = secs, running = false, last = 0, iv = null;
-    function render() {
-      const r = Math.ceil(remain), m = Math.floor(r / 60), s = r % 60;
-      tm.textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
-      fg.style.strokeDashoffset = C * (1 - Math.max(0, remain) / total);
-      el.classList.toggle('warn', remain > 0 && remain <= 60); el.classList.toggle('end', remain <= 0);
-      tg.textContent = running ? '⏸ 暂停' : (remain <= 0 ? '▶ 重来' : '▶ 开始');
-    }
-    function tick() {
-      if (!running) return; const n = performance.now(); remain -= (n - last) / 1000; last = n;
-      if (remain <= 0) { remain = 0; running = false; clearInterval(iv); Snd.sfx.timeup(); end.classList.add('on'); setTimeout(() => end.classList.remove('on'), 6000); }
-      render();
-    }
-    const api = {
-      toggle() { Snd.init(); if (remain <= 0) { remain = total; } running = !running; last = performance.now(); clearInterval(iv); if (running) iv = setInterval(tick, 200); end.classList.remove('on'); render(); },
-      plus() { remain += 60; total = Math.max(total, remain); render(); },
-      minus() { remain = Math.max(0, remain - 60); render(); },
-      reset() { running = false; clearInterval(iv); remain = total = secs; end.classList.remove('on'); render(); },
-      stop() { running = false; clearInterval(iv); }
-    };
-    el.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; Snd.sfx.click(); api[b.dataset.a](); });
-    render(); return api;
-  }
-  function timerKey(e) {
-    const t = state.timer; if (!t) return false;
-    if (e.key === ' ') { t.toggle(); return true; }
-    if (e.key === '+' || e.key === '=') { t.plus(); return true; }
-    if (e.key === '-' || e.key === '_') { t.minus(); return true; }
-    return false;
+  /* ---------- 图片截取（用现场大图做细节放大） ---------- */
+  function cropStyle(c, ar) {
+    const w = c.w, h = w / ar;
+    const x0 = Math.min(Math.max(c.cx - w / 2, 0), IW - w), y0 = Math.min(Math.max(c.cy - h / 2, 0), IH - h);
+    return `background-image:url(scene.jpg);background-size:${(IW / w) * 100}% auto;background-position:${(x0 / (IW - w)) * 100}% ${(y0 / (IH - h)) * 100}%`;
   }
 
-  /* ---------- 布告栏（书桌场景上的卡片） ---------- */
-  const SLOTS = [[535, 40, 140, 120, -2], [743, 77, 137, 123, 0], [982, 38, 128, 135, 1], [1150, 73, 130, 120, 0], [545, 197, 153, 121, -4], [882, 222, 136, 103, 0], [1108, 230, 132, 102, 0]];
-  function renderBoard(layer) {
-    layer.innerHTML = '';
-    SLOTS.forEach((s, i) => {
-      let content = null, key = 's' + i;
-      if (i < 4) { const c = CFG.clues[i]; if (state.found.has(c.id)) content = `<div class="ph" style="${crop(c.crop || c.cropA, s[2] * .84 / (s[3] * .84))}"></div>`; }
-      else if (state.boardLevel >= 7) content = `<div class="ph">${camFrame(CFG.boardCams[i - 4])}</div>`;
-      if (!content) return;
-      const d = document.createElement('div'); d.className = 'pcard' + (state.popped.has(key) ? '' : ' pop');
-      state.popped.add(key);
-      d.style.cssText = `left:${s[0] / 1680 * 100}%;top:${s[1] / 944 * 100}%;width:${s[2] / 1680 * 100}%;height:${s[3] / 944 * 100}%;transform:rotate(${s[4]}deg)`;
-      d.innerHTML = content + '<i class="pin"></i>'; layer.appendChild(d);
-    });
-  }
-  function deskScene(id, extraHTML, opts) {
-    opts = opts || {};
-    const el = addScene(id, '', `<img class="bg" src="assets/img/desk.jpg" alt=""><div class="board-layer"></div>${extraHTML || ''}`);
-    return el;
-  }
-
-  /* ---------- 场景切换 ---------- */
-  function go(id) {
-    const S = scenes[id]; if (!S || state.cur === id) return;
-    if (S.overlay && state.base !== S.base) go(S.base);
+  /* ---------- 场景管理 ---------- */
+  function def(id, o) { o.el.classList.add('scene'); if (o.overlay) o.el.classList.add('overlay'); stage.appendChild(o.el); SC[id] = o; return o; }
+  function go(id, opt) {
+    const sc = SC[id]; if (!sc) return;
     const prev = state.cur;
-    if (prev && scenes[prev] && scenes[prev].leave) scenes[prev].leave(id);
-    Object.entries(scenes).forEach(([k, s]) => {
-      if (k === id) return;
-      if (S.overlay) { if (s.overlay) s.el.classList.remove('on'); } else s.el.classList.remove('on');
-    });
-    if (!S.overlay) state.base = id;
-    S.el.classList.add('on'); state.cur = id; state.timer = null; state.musicManual = null;
-    updateMusic();
-    $$('#toolbar button')[0] && $$('#toolbar button')[0].classList.toggle('off', !Snd.music.playing());
-    S.enter && S.enter(prev);
+    if (prev && SC[prev] && SC[prev].leave) safe(() => SC[prev].leave(id));
+    closeFloaters();
+    if (sc.overlay) {
+      if (sc.under && state.base !== sc.under) { $$('.scene:not(.overlay)').forEach((e) => e.classList.remove('on')); SC[sc.under].el.classList.add('on'); state.base = sc.under; }
+      $$('.scene.overlay').forEach((e) => e.classList.remove('on'));
+      sc.el.classList.add('on');
+    } else {
+      $$('.scene').forEach((e) => e.classList.remove('on'));
+      sc.el.classList.add('on'); state.base = id;
+    }
+    state.cur = id;
+    musicAuto(!!sc.music);
+    document.body.dataset.scene = id;
+    if (sc.enter) safe(() => sc.enter(prev, opt));
   }
-  function updateMusic() {
-    const S = scenes[state.cur];
-    if (S && S.music) Snd.music.on(); else Snd.music.off();
-    syncTools();
+  function next() { const i = ORDER.indexOf(state.cur); if (SC[state.cur] && SC[state.cur].next && SC[state.cur].next()) return; if (i < ORDER.length - 1) go(ORDER[i + 1]); }
+  function prev() { const i = ORDER.indexOf(state.cur); if (SC[state.cur] && SC[state.cur].prev && SC[state.cur].prev()) return; if (i > 0) go(ORDER[i - 1]); }
+
+  /* ---------- 音乐开关（场景自动 + 手动覆盖） ---------- */
+  let musicOverride = null;
+  function musicAuto(want) { musicOverride = null; Snd.setMusic(want); syncTool(); }
+  function toggleMusic() { musicOverride = !Snd.isMusic(); Snd.init(); Snd.setMusic(musicOverride); syncTool(); }
+
+  /* ---------- 布告栏（书桌背景上的 7 张卡片） ---------- */
+  const SLOTS = [[535, 40, 140, 120, -2], [743, 77, 137, 123, 0], [982, 38, 128, 135, 1], [1150, 73, 130, 120, 0], [545, 197, 153, 121, -4], [882, 222, 136, 103, 0], [1108, 230, 132, 102, 0]];
+  function cardInner(i, ar) {
+    if (i < 4) {
+      const c = CFG.clues[i];
+      if (c.id === 'prints') return `<div class="ph" style="${cropStyle(c.cropA, ar)}"></div>`;
+      return `<div class="ph" style="${cropStyle(c.crop, ar)}"></div>`;
+    }
+    return `<div class="ph cam-ph">${Art.KEY(CFG.cams[CFG.boardCams[i - 4]].id)}</div>`;
   }
-  const ids = ORDER.map(o => o[0]);
-  function next() { const i = ids.indexOf(state.cur); if (i < ids.length - 1) go(ids[i + 1]); }
-  function prevScene() { const i = ids.indexOf(state.cur); if (i > 0) go(ids[i - 1]); }
-
-  /* ======================= 1 开始页 ======================= */
-  (function () {
-    const el = addScene('start', '', `<img class="back" src="assets/img/cover.jpg" alt=""><div class="cover"><img src="assets/img/cover.jpg" alt="《雨后的线索：校园小侦探》"><button id="startHit" aria-label="开始调查"></button></div><div id="startTip">老师小提示：按 <b>F</b> 全屏　按 <b>J</b> 打开跳转菜单　→ ← 切换环节</div>`);
-    petalsLayer(16, el);
-    $('#startHit', el).addEventListener('click', () => { Snd.init(); Voice.init(); Snd.sfx.click(); Snd.sfx.sparkle(); go('desk'); });
-    scenes.start = { el, key(e) { if (e.key === 'Enter' || e.key === ' ') { $('#startHit').click(); return true; } } };
-  })();
-
-  /* ======================= 2 书桌 ======================= */
-  (function () {
-    const el = deskScene('desk', `<div class="hit glow" id="nbHit" style="left:31.2%;top:44%;width:36.3%;height:49%"></div><div class="label-tag" style="left:790px;top:560px;font-size:44px">点一点，翻开侦探笔记 📖</div>`);
-    const layer = $('.board-layer', el);
-    $('#nbHit').addEventListener('click', () => { Snd.sfx.page(); go('notebook'); });
-    scenes.desk = { el, enter() { renderBoard(layer); } };
-  })();
-
-  /* ======================= 3 笔记本·案件前情 ======================= */
-  (function () {
-    const el = addScene('notebook', '', `<img class="bg" src="assets/img/notebook.jpg" alt="">
-      <div class="nb-arrow" id="nbL" style="left:32px;top:972px"></div><div class="nb-arrow pulse" id="nbR" style="left:1790px;top:972px"></div>
-      <div class="label-tag" id="nbTip" style="left:1380px;top:890px">翻到下一页 ➜</div>
-      <div class="p2" style="display:none"><div style="position:absolute;left:1002px;top:420px;width:344px;height:340px;background:linear-gradient(90deg,#faf2de,#fbf4e2);border-radius:8px"></div>
-      <div class="page2"><h3>出发！</h3><p>先去现场看看，<br>找出线索吧。</p><button class="btn go pulse" id="goScene" style="font-size:34px;padding:16px 26px">前往现场 🔍</button></div></div>`);
-    let page = 0;
-    const p2 = $('.p2', el), tip = $('#nbTip', el);
-    function turn() {
-      if (page === 1) return; page = 1;
-      peel(el, { left: 977, top: 337, width: 418, height: 633 }, () => { p2.style.display = 'block'; tip.style.display = 'none'; });
-    }
-    function back() { if (page === 0) { go('desk'); return; } page = 0; Snd.sfx.page(); p2.style.display = 'none'; tip.style.display = ''; }
-    $('#nbR', el).addEventListener('click', turn); $('#nbL', el).addEventListener('click', back);
-    $('#goScene', el).addEventListener('click', () => { Snd.sfx.whoosh(); go('scene'); });
-    scenes.notebook = { el, enter() { page = 0; p2.style.display = 'none'; tip.style.display = ''; },
-      key(e) { if (e.key === 'ArrowRight') { if (page === 0) turn(); else go('scene'); return true; } if (e.key === 'ArrowLeft') { back(); return true; } } };
-  })();
-
-  /* ======================= 4 现场搜证 ======================= */
-  (function () {
-    const sx = 1920 / IW, sy = 1080 / IH;
-    const hots = CFG.clues.map((c, i) => { const r = c.hot.r * sx; return `<div class="hot" data-i="${i}" style="left:${c.hot.x * sx - r}px;top:${c.hot.y * sy - r}px;width:${r * 2}px;height:${r * 2}px"><span class="ok">✔</span></div>`; }).join('');
-    const el = addScene('scene', '', `<img class="bg" src="assets/img/scene.jpg" alt="">${hots}
-      <div class="hud"><span>线索</span><span id="hudN">0 / 4</span>${CFG.clues.map(() => '<div class="slot"></div>').join('')}</div>
-      <button class="btn sm hintBtn" id="hintBtn">💡 提示</button>
-      <div class="detail" id="detail"><div class="dcard"><div class="tape"></div><h2></h2><div class="dmedia"></div><div class="q"></div><button class="btn go dclose">收好线索 ✔</button></div></div>`);
-    el.style.cursor = Art.cursorMagnifier();
-    const det = $('#detail', el), slots = $$('.hud .slot', el);
-    function updateHud() {
-      $('#hudN', el).textContent = state.found.size + ' / 4';
-      CFG.clues.forEach((c, i) => { const f = state.found.has(c.id); slots[i].className = 'slot' + (f ? ' full' : ''); slots[i].style.cssText = f ? crop(c.crop || c.cropA, 84 / 68) : ''; $$('.hot', el)[i].classList.toggle('done', f); });
-    }
-    function open(i) {
-      const c = CFG.clues[i], d = $('.dmedia', det);
-      $('h2', det).textContent = `线索${NUM[i]}　${c.name}`;
-      if (c.id === 'hair') d.innerHTML = `<div class="lens" style="${crop(c.crop, 1)}">${Art.hairOverlay()}</div>`;
-      else if (c.id === 'prints') d.innerHTML = `<div class="dpic sm" style="${crop(c.cropA, 4 / 3)}"><div class="cap">脚印 A</div></div><div class="vs">VS</div><div class="dpic sm" style="${crop(c.cropB, 4 / 3)}"><div class="cap">脚印 B</div></div>`;
-      else if (c.id === 'dew') d.innerHTML = `<div class="dpic" style="${crop(c.crop, 4 / 3)}">${Art.dropOverlay()}</div>`;
-      else d.innerHTML = `<div class="dpic" style="${crop(c.crop, 4 / 3)}"></div>`;
-      $('.q', det).innerHTML = '<div style="font-size:34px;color:#8a6a4e;font-family:var(--disp)">想一想，问一问：</div>' + c.ask.map(a => `<span>${a}</span>`).join('');
-      const isNew = !state.found.has(c.id);
-      state.found.add(c.id); det.classList.add('on'); Snd.sfx.ding(); if (isNew) setTimeout(Snd.sfx.pin, 400);
-      updateHud(); const sl = slots[i]; sl.classList.add('pop');
-    }
-    function close() {
-      if (!det.classList.contains('on')) return; det.classList.remove('on'); Snd.sfx.click();
-      if (state.found.size >= CFG.clues.length) setTimeout(() => { if (state.cur === 'scene') go('call1'); }, 700);
-    }
-    $$('.hot', el).forEach(hh => hh.addEventListener('click', () => open(+hh.dataset.i)));
-    $('.dclose', det).addEventListener('click', close);
-    det.addEventListener('click', e => { if (e.target === det) close(); });
-    $('#hintBtn', el).addEventListener('click', () => { $$('.hot', el).forEach(x => { if (!x.classList.contains('done')) x.classList.add('hint'); }); setTimeout(() => $$('.hot', el).forEach(x => x.classList.remove('hint')), 2600); Snd.sfx.sparkle(); });
-    scenes.scene = { el, enter() { updateHud(); },
-      key(e) { if (e.key === 'Escape' && det.classList.contains('on')) { close(); return true; } if (e.key === 'Enter' && det.classList.contains('on')) { close(); return true; } if (e.key === 'h' || e.key === 'H') { $('#hintBtn', el).click(); return true; } } };
-  })();
-
-  /* ======================= 白奶奶通话 ======================= */
-  function makeCall(key, base, outgoing) {
-    const conf = CFG.grandma[key];
-    const el = addScene(key, 'overlay', `<div class="callwin"><div class="cw-top"><div class="rec"><i></i><span>白奶奶　视频通话</span></div><div class="ctime">00:00</div></div>
-      <div class="cw-body"><div class="sub"></div><img class="gimg ring" src="assets/img/grandma.png" alt="白奶奶"><div class="react" style="right:140px;top:200px"></div>
-      <div class="ringbox"><div class="rtxt">${conf.ring}</div><div class="callbtns"><button class="cbtn acc" title="接听">📞</button></div></div></div></div>
-      <div class="ctrlHint">数字键 1–9 播放台词　H 隐藏/显示按钮</div><div class="ctrl" style="display:none"></div>`);
-    const ui = { sub: $('.sub', el), img: $('.gimg', el), react: $('.react', el) };
-    const ctrl = $('.ctrl', el), hint = $('.ctrlHint', el), rb = $('.ringbox', el), ct = $('.ctime', el);
-    let live = false, t0 = 0, iv = null, autoT = null;
-    const lines = conf.lines;
-    ctrl.innerHTML = lines.map((l, i) => `<div class="lb" data-i="${i}"><b>${i + 1}</b>${l.k}</div>`).join('') +
-      (key === 'call1' ? '<div class="lb hang" data-act="hang"><b>0</b>📵 挂断</div>' : '<div class="lb act" data-act="map"><b>0</b>🗺 打开校园地图</div>');
-    function connect() {
-      if (live) return; live = true; Snd.sfx.ringStop(); Snd.sfx.click();
-      rb.style.display = 'none'; ui.img.className = 'gimg idle'; ctrl.style.display = 'flex'; t0 = Date.now();
-      iv = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); ct.textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }, 500);
-      setTimeout(() => live && sayIn(ui, conf.intro), 700);
-    }
-    function finish() {
-      stopSay(ui); Snd.sfx.hang();
-      if (key === 'call1') { state.boardLevel = Math.max(state.boardLevel, 4); go('group'); } else { go('map'); }
-    }
-    function act(a) { if (a === 'hang' || a === 'map') finish(); }
-    $('.cbtn', el).addEventListener('click', connect);
-    ctrl.addEventListener('click', e => { const b = e.target.closest('.lb'); if (!b) return; if (b.dataset.act) act(b.dataset.act); else sayIn(ui, lines[+b.dataset.i]); });
-    scenes[key] = { el, overlay: true, base,
-      enter() {
-        live = false; ct.textContent = '00:00'; rb.style.display = ''; ctrl.style.display = 'none'; ui.sub.classList.remove('on');
-        ui.img.className = 'gimg ring'; Snd.sfx.ringStart(outgoing);
-        clearTimeout(autoT); if (outgoing) autoT = setTimeout(() => { if (state.cur === key) connect(); }, 3400);
-      },
-      leave() { clearTimeout(autoT); clearInterval(iv); live = false; Snd.sfx.ringStop(); stopSay(ui); },
-      key(e) {
-        if (!live && (e.key === 'Enter' || e.key === ' ')) { connect(); return true; }
-        if (e.key === 'h' || e.key === 'H') { ctrl.classList.toggle('hide'); hint.style.display = ctrl.classList.contains('hide') ? 'none' : ''; return true; }
-        if (!live) return false;
-        if (/^[1-9]$/.test(e.key) && lines[+e.key - 1]) { sayIn(ui, lines[+e.key - 1]); return true; }
-        if (e.key === '0') { act(key === 'call1' ? 'hang' : 'map'); return true; }
-        if (e.key === 'ArrowRight') { act(key === 'call1' ? 'hang' : 'map'); return true; }
-        return false;
-      }
-    };
+  function makeBoard() {
+    const b = el('<div class="board"></div>');
+    SLOTS.forEach((s, i) => {
+      const d = el(`<div class="slot" data-i="${i}" style="left:${(s[0] / 1680) * 100}%;top:${(s[1] / 944) * 100}%;width:${(s[2] / 1680) * 100}%;height:${(s[3] / 944) * 100}%;--rot:${s[4]}deg"><div class="slot-in">${cardInner(i, (s[2] * 0.86) / (s[3] * 0.86))}</div></div>`);
+      b.appendChild(d);
+    });
+    return b;
   }
-  makeCall('call1', 'scene', false);
-
-  /* ======================= 6 小组讨论 + 监控 ======================= */
-  (function () {
-    const el = deskScene('group', `<div class="compHit glow" id="compHit">${Art.computer()}</div><div class="label-tag" style="left:1260px;top:440px">点开电脑，查看校园监控 📺</div>
-      <div class="ribbon" style="left:30px;top:150px;font-size:38px;padding:8px 40px">小组讨论</div>
-      <button class="btn hold" id="holdEnd"><div class="fillbar"></div><span>长按　结束讨论 ▶</span></button>
-      <div class="cctv" id="cctv"><div class="monitor"><div class="screen"><div class="grid"></div><div class="big"><div class="fr"></div><div class="hudc"></div><div class="tipz">点一下画面可以放大，再点一下恢复</div><button class="btn sm back">↩ 返回监控墙</button></div></div>
-      <div class="mbar"><div style="display:flex;gap:14px;align-items:center"><span class="led"></span><span class="nm">校园监控</span></div><div class="ctm" id="ctm">08:00</div><button class="btn sm stop" id="cctvClose">关闭监控 ✖</button></div></div></div>`);
-    const layer = $('.board-layer', el), cctv = $('#cctv', el), grid = $('.grid', el), big = $('.big', el), fr = $('.big .fr', el);
-    const timerHost = document.createElement('div'); el.appendChild(timerHost);
-    let tm = null, zoomed = false;
-    CFG.gridOrder.forEach((camIdx, pos) => {
-      const c = CFG.cams[camIdx], no = String(pos + 1).padStart(2, '0');
-      const cell = h(`<div class="cell" data-i="${camIdx}" data-pos="${no}"><div class="fr">${camFrame(camIdx)}</div><div class="tint"></div><div class="hudc"><span>CAM ${no}</span><span>${c.time}</span></div><div class="rec2"><i></i>REC</div></div>`);
-      cell.addEventListener('click', () => openBig(camIdx, no)); grid.appendChild(cell);
-    });
-    function openBig(camIdx, no) {
-      Snd.sfx.stat(); zoomed = false; fr.style.transform = ''; fr.style.cursor = 'zoom-in';
-      fr.innerHTML = camFrame(camIdx); $('.hudc', big).innerHTML = `<span>CAM ${no}</span><span>${CFG.cams[camIdx].time}</span>`; big.classList.add('on');
-    }
-    function closeBig() { big.classList.remove('on'); Snd.sfx.click(); }
-    function setOrigin(e) { const r = big.getBoundingClientRect(); fr.style.transformOrigin = `${(e.clientX - r.left) / r.width * 100}% ${(e.clientY - r.top) / r.height * 100}%`; }
-    fr.addEventListener('click', e => { zoomed = !zoomed; if (zoomed) { setOrigin(e); fr.style.transform = 'scale(2.3)'; fr.style.cursor = 'zoom-out'; } else { fr.style.transform = ''; fr.style.cursor = 'zoom-in'; } Snd.sfx.click(); });
-    fr.addEventListener('mousemove', e => { if (zoomed) setOrigin(e); });
-    $('.big .back', el).addEventListener('click', closeBig);
-    let ctmIv = null;
-    function openCCTV() { cctv.classList.add('on'); Snd.sfx.stat(); clearInterval(ctmIv); ctmIv = setInterval(() => { const t = $('.tm', timerHost); if (t) $('#ctm', el).textContent = t.textContent; }, 300); }
-    function closeCCTV() { big.classList.remove('on'); cctv.classList.remove('on'); clearInterval(ctmIv); Snd.sfx.click(); }
-    $('#compHit', el).addEventListener('click', openCCTV); $('#cctvClose', el).addEventListener('click', closeCCTV);
-    holdBtn($('#holdEnd', el), 900, () => { Snd.sfx.click(); go('meeting'); });
-    scenes.group = { el, music: true,
-      enter() { state.boardLevel = Math.max(state.boardLevel, 4); renderBoard(layer); if (!tm) tm = makeTimer(timerHost, CFG.timers.group, true); state.timer = tm; cctv.classList.remove('on'); big.classList.remove('on'); },
-      leave() { state.boardLevel = 7; },
-      key(e) { if (e.key === 'Escape') { if (big.classList.contains('on')) closeBig(); else closeCCTV(); return true; } return timerKey(e); } };
-  })();
-
-  /* ======================= 7 推理会议 ======================= */
-  (function () {
-    const el = addScene('meeting', '', `<img class="room" src="assets/img/desk.jpg" alt="">
-      <div class="ribbon" style="left:50px;top:36px;font-size:40px;padding:10px 40px">推理会议</div>
-      <div class="cork"><svg class="str" viewBox="0 0 1246 756"></svg></div>
-      <div class="scrollSpr" id="scrSpr" title="点开语言支架">${Art.scrollSprite()}</div><div class="label-tag" style="left:1470px;top:770px;font-size:30px">点开卷轴　语言支架</div>
-      <div class="scrollPanel" id="scrPanel"><button class="scClose">✕</button><h3>语言支架</h3></div>
-      <button class="btn go" id="meetEnd" style="position:absolute;left:50px;bottom:22px;z-index:40;font-size:32px;padding:14px 30px">结束推理会议 ▶</button>
-      <div class="lightbox" id="lbx"><div class="lc"><div class="lp"></div><div class="lt"></div></div></div>`);
-    const cork = $('.cork', el), svg = $('svg.str', el), timerHost = document.createElement('div'); el.appendChild(timerHost);
-    const items = [];
-    CFG.clues.forEach((c, i) => items.push({ t: `线索${NUM[i]}　${c.short}`, ph: (ar) => `<div class="ph" style="${crop(c.crop || c.cropA, ar)}"></div>`, big: `<div class="lp" style="${crop(c.crop || c.cropA, 4 / 3)}"></div>` }));
-    CFG.boardCams.forEach((ci, i) => items.push({ t: `监控 ${CFG.cams[ci].time}`, ph: () => `<div class="ph">${camFrame(ci)}</div>`, big: `<div class="lp">${camFrame(ci)}</div>` }));
-    const pos = [[34, 56, -2], [344, 40, 1.5], [654, 62, -1], [964, 46, 2], [190, 420, 1.5], [510, 436, -2], [830, 416, 1]];
-    const pins = ['#ee86a0', '#7fa8d6', '#f0c75a', '#9ccb92', '#b79ad6', '#ee86a0', '#f0a05a'];
-    const pts = pos.map(p => [p[0] + 145, p[1] + 2]);
-    const order = [0, 1, 2, 3, 6, 5, 4, 0, 2, 5];
-    let d = ''; order.forEach((k, i) => { const p = pts[k]; if (i === 0) d += `M${p[0]} ${p[1]}`; else { const q = pts[order[i - 1]]; d += ` Q${(p[0] + q[0]) / 2} ${Math.max(p[1], q[1]) + 70} ${p[0]} ${p[1]}`; } });
-    svg.innerHTML = `<path d="${d}" fill="none" stroke="#d6493b" stroke-width="4" stroke-linecap="round" opacity=".85"/>`;
-    items.forEach((it, i) => {
-      const c = h(`<div class="mcard" style="left:${pos[i][0]}px;top:${pos[i][1]}px;transform:rotate(${pos[i][2]}deg);--pc:${pins[i]}"><i class="pin"></i>${it.ph(4 / 3)}<div class="cp">${it.t}</div></div>`);
-      c.style.transform = `rotate(${pos[i][2]}deg)`; c.dataset.r = pos[i][2];
-      c.addEventListener('click', () => { const lb = $('#lbx', el); $('.lc', lb).innerHTML = it.big + `<div class="lt">${it.t}</div>`; lb.classList.add('on'); Snd.sfx.click(); });
-      cork.appendChild(c);
-    });
-    $('#lbx', el).addEventListener('click', () => $('#lbx', el).classList.remove('on'));
-    const cats = [['提出问题', '#cfe2f2', ['请问……？', '为什么……？', '这些线索说明了什么？']], ['表达推测', '#d5ebc4', ['我认为……，因为……']], ['表示同意', '#fbe7a6', ['我同意你的看法，因为……']], ['补充意见', '#f9d2a8', ['我想补充一点……']], ['提出质疑', '#f6c5cc', ['可是，我想知道……', '如果……，为什么……？']], ['礼貌回应', '#dccaf0', ['谢谢你的意见。', '不好意思，我有不同的看法。']]];
-    const panel = $('#scrPanel', el);
-    cats.forEach(c => { panel.appendChild(h(`<div class="cat" style="background:${c[1]}"><div class="ct">${c[0]}</div><div class="cs">${c[2].join('<br>')}</div></div>`)); });
-    panel.addEventListener('click', e => {
-      const cat = e.target.closest('.cat');
-      if (e.target.closest('.scClose')) { panel.classList.remove('on'); $('#scrSpr', el).style.display = ''; Snd.sfx.page(); return; }
-      if (!cat) return; const was = cat.classList.contains('sp'); $$('.cat', panel).forEach(x => x.classList.remove('sp'));
-      if (!was) { cat.classList.add('sp'); panel.classList.add('spot'); } else panel.classList.remove('spot'); Snd.sfx.click();
-    });
-    $('#scrSpr', el).addEventListener('click', () => { Snd.sfx.page(); panel.classList.add('on'); $('#scrSpr', el).style.display = 'none'; });
-    $('#meetEnd', el).addEventListener('click', () => { Snd.sfx.click(); go('deskPhone'); });
-    let tm = null;
-    scenes.meeting = { el, music: true,
-      enter() { if (!tm) tm = makeTimer(timerHost, CFG.timers.meeting); state.timer = tm; panel.classList.remove('on'); $('#scrSpr', el).style.display = ''; },
-      key(e) { if (e.key === 'Escape') { $('#lbx', el).classList.remove('on'); panel.classList.remove('on'); $('#scrSpr', el).style.display = ''; return true; } return timerKey(e); } };
-  })();
-
-  /* ======================= 8 回到书桌·手机 ======================= */
-  (function () {
-    const el = deskScene('deskPhone', `<div class="compHit glow" id="phHit" style="left:1290px;top:560px;width:230px;height:390px;transform:rotate(-8deg)">${Art.phone()}</div><div class="label-tag" style="left:1180px;top:480px">点手机，拨给白奶奶 📞</div>`);
-    const layer = $('.board-layer', el);
-    $('#phHit', el).addEventListener('click', () => { Snd.sfx.click(); go('call2'); });
-    scenes.deskPhone = { el, enter() { state.boardLevel = 7; renderBoard(layer); } };
-  })();
-  makeCall('call2', 'deskPhone', true);
-
-  /* ======================= 校园地图 ======================= */
-  (function () {
-    const MAP = Art.MAP, N = MAP.nodes;
-    const el = addScene('map', '', `<div class="mapsvg" id="mapsvg">${Art.mapSVG()}<svg id="trail" viewBox="0 0 1920 1080" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><polyline fill="none" stroke="#e5604b" stroke-width="9" stroke-dasharray="4 18" stroke-linecap="round" points=""/></svg></div>
-      <div class="mapTip">请告诉白奶奶：从花园出发，该往哪里走？</div>
-      <div class="pip"><div class="sub"></div><div style="position:relative;width:230px;height:230px;flex:none;border:6px solid var(--ink);border-radius:30px 70px 30px 70px;background:radial-gradient(circle,#fff6dc,#efd9a8);overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.4)"><img class="gimg idle" src="assets/img/grandma.png" style="width:290px;bottom:-12px" alt=""><div class="react" style="right:10px;top:0;font-size:56px"></div></div></div>
-      <div class="hole" id="hole" style="left:1800px;top:200px"></div><div class="holeBtn" id="holeBtn" style="left:1500px;top:290px">🔍 发现小洞口！点一点</div>
-      <div class="ctrl" style="bottom:20px"></div>`);
-    const mapEl = $('#mapsvg', el);
-    Object.entries(N).forEach(([k, n]) => {
-      if (!n.n) return;
-      const nd = h(`<div class="node" data-k="${k}" style="left:${n.x}px;top:${n.y}px"></div>`); mapEl.appendChild(nd);
-      mapEl.appendChild(h(`<div class="nlabel" style="left:${n.x}px;top:${n.y + 34}px">${n.n}</div>`));
-    });
-    const gm = h(`<div class="gmark"><div class="face"><img src="assets/img/grandma.png" alt=""></div></div>`); mapEl.appendChild(gm);
-    const arrive = h('<div class="arrive"></div>'); mapEl.appendChild(arrive);
-    const ui = { sub: $('.pip .sub', el), img: $('.pip .gimg', el), react: $('.pip .react', el) };
-    const lines = CFG.grandma.map.lines, ctrl = $('.ctrl', el), trail = $('#trail polyline', el), holeBtn = $('#holeBtn', el), hole = $('#hole', el);
-    ctrl.innerHTML = lines.map((l, i) => `<div class="lb" data-i="${i}"><b>${i + 1}</b>${l.k}</div>`).join('') + '<div class="lb act" data-act="reveal"><b>0</b>▶ 真相揭晓</div>';
-    let at = 'G', walking = false, pts = [], raf = 0;
-    function place(k) { gm.style.left = N[k].x + 'px'; gm.style.top = N[k].y + 'px'; }
-    function path(a, b) {
-      const adj = {}; MAP.edges.forEach(([x, y]) => { (adj[x] = adj[x] || []).push(y); (adj[y] = adj[y] || []).push(x); });
-      const prev = { [a]: null }, q = [a];
-      while (q.length) { const c = q.shift(); if (c === b) break; (adj[c] || []).forEach(n => { if (!(n in prev)) { prev[n] = c; q.push(n); } }); }
-      const out = []; for (let c = b; c; c = prev[c]) out.unshift(c); return out;
-    }
-    function walk(to) {
-      if (walking || to === at) return; const route = path(at, to); walking = true; arrive.classList.remove('on'); gm.classList.add('walk');
-      let seg = 0, t = 0, p0 = N[route[0]], p1 = N[route[1]], dist = Math.hypot(p1.x - p0.x, p1.y - p0.y), last = performance.now(), stepT = 0;
-      const frame = (now) => {
-        const dt = (now - last) / 1000; last = now; t += dt * 420 / dist; stepT += dt;
-        if (stepT > .28) { stepT = 0; Snd.sfx.step(); }
-        if (t >= 1) {
-          pts.push(`${p1.x},${p1.y}`); seg++;
-          if (seg >= route.length - 1) { place(to); trail.setAttribute('points', pts.join(' ')); walking = false; gm.classList.remove('walk'); at = to; onArrive(to); return; }
-          p0 = N[route[seg]]; p1 = N[route[seg + 1]]; dist = Math.hypot(p1.x - p0.x, p1.y - p0.y); t = 0;
-        }
-        const x = p0.x + (p1.x - p0.x) * t, y = p0.y + (p1.y - p0.y) * t;
-        gm.style.left = x + 'px'; gm.style.top = y + 'px'; trail.setAttribute('points', pts.concat([`${x},${y}`]).join(' '));
-        raf = requestAnimationFrame(frame);
-      };
-      raf = requestAnimationFrame(frame);
-    }
-    function onArrive(k) {
-      const n = N[k]; arrive.textContent = `我到${n.n}了！`; arrive.style.left = n.x + 'px'; arrive.style.top = (n.y + 34 + 52) + 'px'; arrive.classList.add('on'); Snd.sfx.sparkle();
-      setTimeout(() => arrive.classList.remove('on'), 2600);
-      if (k === 'W') { hole.classList.add('on'); holeBtn.classList.add('on'); }
-    }
-    function reveal() {
-      Snd.sfx.whoosh(); mapEl.style.transition = 'transform 1.4s ease-in'; mapEl.style.transformOrigin = '1800px 200px'; mapEl.style.transform = 'scale(4)';
-      setTimeout(() => { go('reveal'); }, 1300);
-    }
-    mapEl.addEventListener('click', e => { const nd = e.target.closest('.node'); if (nd) { Snd.sfx.click(); walk(nd.dataset.k); } });
-    holeBtn.addEventListener('click', reveal);
-    ctrl.addEventListener('click', e => { const b = e.target.closest('.lb'); if (!b) return; if (b.dataset.act) reveal(); else sayIn(ui, lines[+b.dataset.i]); });
-    scenes.map = { el,
-      enter() { cancelAnimationFrame(raf); walking = false; at = 'G'; pts = [`${N.G.x},${N.G.y}`]; trail.setAttribute('points', ''); place('G'); gm.classList.remove('walk'); arrive.classList.remove('on'); hole.classList.remove('on'); holeBtn.classList.remove('on'); mapEl.style.transition = 'none'; mapEl.style.transform = 'none'; ui.sub.classList.remove('on'); },
-      leave() { cancelAnimationFrame(raf); stopSay(ui); },
-      key(e) {
-        if (/^[1-7]$/.test(e.key) && lines[+e.key - 1]) { sayIn(ui, lines[+e.key - 1]); return true; }
-        if (e.key === '0') { reveal(); return true; }
-        if (e.key === 'ArrowRight') { reveal(); return true; }
-      } };
-  })();
-
-  /* ======================= 真相揭晓 ======================= */
-  (function () {
-    const el = addScene('reveal', '', `<video id="rvVideo" playsinline preload="auto"></video><div class="ph" id="rvPh" style="display:none"></div><div id="revealTitle"><span>真相揭晓时刻</span></div><div id="revealCap">原来是叔叔养的黑猫和橘猫！</div><button class="btn sm" id="revealSkip">跳过 ▶</button>`);
-    const v = $('#rvVideo', el), ph = $('#rvPh', el), cap = $('#revealCap', el);
-    let phT = [], usingPh = false, started = false;
-    function finish() { if (state.cur === 'reveal') go('review'); }
-    function startPlaceholder() {
-      if (usingPh) return; usingPh = true; v.style.display = 'none'; ph.style.display = 'block'; ph.innerHTML = Art.revealPlaceholder();
-      const wall = $('#rv-wall', ph);
-      wall.style.transformOrigin = '960px 540px';
-      wall.animate([{ transform: 'scale(1)', opacity: 1 }, { transform: 'scale(4.5)', opacity: 1, offset: .55 }, { transform: 'scale(6)', opacity: 0 }], { duration: 6500, fill: 'forwards', easing: 'ease-in-out' });
-      Snd.sfx.whoosh(); phT.push(setTimeout(() => { cap.style.opacity = 1; Snd.sfx.ding(); }, 7000)); phT.push(setTimeout(finish, 12500));
-    }
-    v.addEventListener('ended', finish);
-    v.addEventListener('error', startPlaceholder);
-    $('#revealSkip', el).addEventListener('click', finish);
-    scenes.reveal = { el,
-      enter() {
-        usingPh = false; phT.forEach(clearTimeout); phT = []; cap.style.opacity = 0; ph.style.display = 'none'; v.style.display = 'block';
-        v.src = CFG.revealVideo; v.currentTime = 0; v.volume = 1;
-        const pr = v.play(); if (pr && pr.catch) pr.catch(() => { if (v.error || v.networkState === 3) startPlaceholder(); });
-        phT.push(setTimeout(() => { if (v.readyState === 0 && !usingPh) startPlaceholder(); }, 2500));
-      },
-      leave() { phT.forEach(clearTimeout); try { v.pause(); } catch (e) {} },
-      key(e) { if (e.key === ' ') { if (!usingPh) { v.paused ? v.play() : v.pause(); } return true; } if (e.key === 'Escape') { finish(); return true; } }
-    };
-  })();
-
-  /* ======================= 9 笔记本回顾 ======================= */
-  (function () {
-    const el = addScene('review', '', `<div class="deskL" style="position:absolute;inset:0"><img class="bg" src="assets/img/desk.jpg" alt=""><div class="board-layer"></div><div class="hit glow" id="rvOpen" style="left:31.2%;top:44%;width:36.3%;height:49%"></div></div>
-      <div class="nbL" style="position:absolute;inset:0;opacity:0;visibility:hidden;transition:opacity .6s"><img class="bg" src="assets/img/notebook_blank.jpg" alt="">
-        <div class="nbpage L"></div><div class="nbpage R"></div><div class="stamp" id="stamp">破案<br>成功</div><div class="confetti" id="conf"></div>
-        <div class="nb-arrow" id="rvL" style="left:32px;top:972px"></div><div class="nb-arrow" id="rvR" style="left:1790px;top:972px"></div></div>`);
-    const deskL = $('.deskL', el), nbL = $('.nbL', el), L = $('.nbpage.L', el), R = $('.nbpage.R', el), stamp = $('#stamp', el), conf = $('#conf', el);
-    const layer = $('.board-layer', el);
-    const pol = (inner, title, w, rot) => `<div class="polaroid" style="width:${w}px;transform:rotate(${rot || -2}deg)"><div class="pp">${inner}</div><div class="pt">${title}</div></div>`;
-    const spreads = [];
-    CFG.clues.forEach((c, i) => {
-      spreads.push({
-        L: c.id === 'prints'
-          ? `<div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:-10px">${pol(`<div style="position:absolute;inset:0;${crop(c.cropA, 4 / 3)}"></div>`, '脚印 A', 250, -3)}${pol(`<div style="position:absolute;inset:0;${crop(c.cropB, 4 / 3)}"></div>`, '脚印 B', 250, 2)}</div>`
-          : `<div style="display:flex;flex-direction:column;align-items:center;margin-top:30px">${pol(`<div style="position:absolute;inset:0;${crop(c.crop, 4 / 3)}"></div>`, `线索${NUM[i]}　${c.short}`, 320, -2)}</div>`,
-        R: `<div class="sticker">已破解 ✔</div><div class="hd">我们的发现</div><div class="tx">${c.truth}</div>`
+  function refreshBoards() {
+    $$('.board').forEach((b) => {
+      $$('.slot', b).forEach((s) => {
+        const i = +s.dataset.i;
+        const on = i < 4 ? state.found.has(CFG.clues[i].id) : state.boardAll;
+        if (on && !s.classList.contains('on')) { s.classList.add('on', 'pop'); setTimeout(() => s.classList.remove('pop'), 900); }
+        if (!on) s.classList.remove('on');
       });
     });
-    spreads.push({ L: `<div style="margin-top:36px">${pol(Art.miniRoute(), '监控里的路线', 330, -2)}</div>`, R: `<div class="hd">足迹路线</div><div class="tx">花园 → 走廊 → 小卖部 → 图书馆 → 体育馆旁的小路</div>` });
-    spreads.push({ L: `<div style="margin-top:36px">${pol(Art.truthIllustration(), '真相大白', 330, 2)}</div>`, R: `<div class="hd">真相</div><div class="tx">叔叔养的黑猫和橘猫，溜进花园偷吃了百日菊！</div>` });
-    spreads.push({ L: `<div class="hd" style="font-size:54px;margin-top:70px;text-align:center">恭喜你们！</div><div class="tx" style="text-align:center;margin-top:30px">小侦探们<br>成功破案啦！<br>你们会提问、会推理、<br>也会礼貌地交流。</div>`, R: `<div class="tx" style="margin-top:318px;font-size:30px">了不起的小侦探！</div>`, stamp: true });
-    let i = 0, open = false, busy = false;
-    function fill(n) { L.innerHTML = spreads[n].L; R.innerHTML = spreads[n].R; stamp.classList.remove('on'); stamp.style.opacity = 0; conf.innerHTML = ''; }
-    function after(n) {
-      if (spreads[n].stamp) setTimeout(() => { if (state.cur !== 'review' || i !== n) return; stamp.style.opacity = ''; stamp.classList.add('on'); Snd.sfx.stamp(); setTimeout(() => { Snd.sfx.ding(); petalsLayer(30, conf); }, 450); }, 800);
+  }
+
+  /* ---------- 页面剥开（翻页）效果 ---------- */
+  function peel(host, mid, dir) {
+    const sh = el(`<div class="peel ${dir === 'back' ? 'back' : ''}"></div>`);
+    host.appendChild(sh); Snd.page();
+    setTimeout(() => safe(mid), 330);
+    setTimeout(() => sh.remove(), 900);
+  }
+
+  /* ---------- 计时器 ---------- */
+  let activeTimer = null;
+  function makeTimer(host, secs) {
+    host.innerHTML = `<div class="tm"><svg class="tm-ring" viewBox="0 0 100 100"><circle class="r0" cx="50" cy="50" r="42"/><circle class="r1" cx="50" cy="50" r="42" transform="rotate(-90 50 50)"/></svg><div class="tm-num">00:00</div><div class="tm-ctl"><button class="tm-go">▶ 开始</button><button class="tm-m">−1分</button><button class="tm-p">＋1分</button><button class="tm-r">↺</button></div><div class="tm-done">时间到！</div></div>`;
+    const root = $('.tm', host), num = $('.tm-num', host), go_ = $('.tm-go', host), r1 = $('.r1', host);
+    const T = { total: secs, remain: secs, running: false, end: 0, id: null, done: false };
+    const C = 2 * Math.PI * 42; r1.style.strokeDasharray = C;
+    function draw() {
+      const r = Math.max(0, Math.ceil(T.remain));
+      num.textContent = String(Math.floor(r / 60)).padStart(2, '0') + ':' + String(r % 60).padStart(2, '0');
+      r1.style.strokeDashoffset = C * (1 - (T.total ? Math.min(1, T.remain / T.total) : 0));
+      root.classList.toggle('warn', T.remain <= 60 && T.remain > 0 && T.running);
+      root.classList.toggle('end', T.done);
+      go_.textContent = T.running ? '❚❚ 暂停' : (T.remain < T.total && !T.done ? '▶ 继续' : '▶ 开始');
     }
-    function turn(dir) {
-      if (!open || busy) return; const n = i + dir;
-      if (n < 0) return;
-      if (n >= spreads.length) { busy = true; peel(nbL, { left: 977, top: 337, width: 418, height: 633 }, () => {}); setTimeout(() => { busy = false; showAlarm(); }, 700); return; }
-      busy = true;
-      if (dir > 0) peel(nbL, { left: 977, top: 337, width: 418, height: 633 }, () => { i = n; fill(i); }); else { Snd.sfx.page(); i = n; fill(i); }
-      setTimeout(() => { busy = false; after(n); }, dir > 0 ? 900 : 100);
+    function tick() {
+      T.remain = (T.end - Date.now()) / 1000;
+      if (T.remain <= 0) { T.remain = 0; T.running = false; T.done = true; clearInterval(T.id); Snd.timeup(); }
+      draw();
     }
-    function openBook() {
-      if (open) return; open = true; Snd.sfx.page(); i = 0; fill(0);
-      nbL.style.visibility = 'visible'; nbL.style.opacity = 1; setTimeout(() => { deskL.style.visibility = 'hidden'; }, 650);
-    }
-    $('#rvOpen', el).addEventListener('click', openBook);
-    $('#rvR', el).addEventListener('click', () => turn(1)); $('#rvL', el).addEventListener('click', () => turn(-1));
-    let openT = 0;
-    scenes.review = { el,
-      enter() { open = false; busy = false; i = 0; deskL.style.visibility = 'visible'; nbL.style.opacity = 0; nbL.style.visibility = 'hidden'; renderBoard(layer); clearTimeout(openT); openT = setTimeout(() => { if (state.cur === 'review') openBook(); }, 1800); },
-      leave() { clearTimeout(openT); },
-      key(e) { if (e.key === 'ArrowRight') { if (!open) openBook(); else turn(1); return true; } if (e.key === 'ArrowLeft') { turn(-1); return true; } }
+    T.toggle = function () {
+      Snd.init();
+      if (T.done) { T.reset(); return; }
+      if (T.running) { T.running = false; clearInterval(T.id); }
+      else { T.running = true; T.end = Date.now() + T.remain * 1000; T.id = setInterval(tick, 200); Snd.click(); }
+      draw();
     };
+    T.add = function (d) { T.done = false; T.remain = Math.max(0, T.remain + d); T.total = Math.max(T.total, T.remain); if (T.running) T.end = Date.now() + T.remain * 1000; draw(); Snd.click(); };
+    T.reset = function () { clearInterval(T.id); T.running = false; T.done = false; T.total = secs; T.remain = secs; draw(); };
+    go_.onclick = T.toggle; $('.tm-m', host).onclick = () => T.add(-60); $('.tm-p', host).onclick = () => T.add(60); $('.tm-r', host).onclick = T.reset;
+    draw(); return T;
+  }
+
+  /* ---------- 长按按钮（防止学生误点） ---------- */
+  function longPress(btn, ms, fn) {
+    let t = null;
+    const start = (e) => { e.preventDefault(); btn.classList.add('holding'); Snd.init(); t = setTimeout(() => { btn.classList.remove('holding'); fn(); }, ms); };
+    const stop = () => { clearTimeout(t); btn.classList.remove('holding'); };
+    btn.addEventListener('pointerdown', start); ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, stop));
+  }
+
+  /* ---------- 白奶奶：语音（浏览器朗读）与动作 ---------- */
+  const Voice = (function () {
+    let voice = null, timer = null, curAudio = null, gen = 0;
+    const V = () => Object.assign({ rate: 1.5, pitch: 0.8, voiceName: '' }, CFG.voice || {});
+    function pick() {
+      if (!window.speechSynthesis) return;
+      const vs = speechSynthesis.getVoices(), want = V().voiceName;
+      voice = (want && vs.find((v) => v.name.toLowerCase().includes(want.toLowerCase()))) ||
+        vs.find((v) => /zh/i.test(v.lang) && /xiaoxiao|xiaoyi|huihui|yaoyao|tingting|mei-?jia|sin-?ji|yunxi/i.test(v.name)) || vs.find((v) => /^zh/i.test(v.lang)) || null;
+    }
+    if (window.speechSynthesis) { pick(); speechSynthesis.onvoiceschanged = pick; }
+    function stop() { gen++; clearTimeout(timer); if (window.speechSynthesis) speechSynthesis.cancel(); if (curAudio) { curAudio.pause(); curAudio = null; } }
+    /* 把一句话按标点切成小段：每段单独朗读，语气有起伏、有自然停顿，也避免浏览器朗读长句时中途卡住 */
+    function split(t) {
+      const parts = t.match(/[^，。！？、…；,.!?;]+[，。！？、…；,.!?;]*/g) || [t], out = [];
+      parts.forEach((p) => { if (out.length && out[out.length - 1].replace(/[，。！？、…；,.!?;]/g, '').length < 3) out[out.length - 1] += p; else out.push(p); });
+      return out;
+    }
+    function say(line, ui, done) {
+      stop(); const my = gen;
+      let shown = false, finished = false;
+      const show = () => {
+        if (shown || my !== gen) return; shown = true;
+        if (ui.sub) { ui.sub.textContent = line.t; ui.sub.classList.add('on'); }
+        emote(ui, line.e); ui.wrap.classList.add('talking');
+      };
+      const fin = () => {
+        if (finished || my !== gen) return; finished = true; show(); ui.wrap.classList.remove('talking'); clearTimeout(timer);
+        timer = setTimeout(() => { if (my === gen && ui.sub) ui.sub.classList.remove('on'); }, 4000); if (done) done();
+      };
+      const est = line.t.length * 230 / Math.max(0.6, V().rate / 1.5) + 2500;
+      const tts = () => {
+        if (!window.speechSynthesis) { show(); timer = setTimeout(fin, est); return; }
+        const parts = split(line.t), cfg = V(); let k = 0;
+        // 字幕与动作：等声音真正开始说话才出现（最多等 1.2 秒），保证说话和字幕同步
+        const fallback = setTimeout(show, 1200);
+        const next = () => {
+          if (my !== gen) return;
+          if (k >= parts.length) { clearTimeout(fallback); fin(); return; }
+          const p = parts[k++], last = /[？?]\s*$/.test(p), excl = /[！!]\s*$/.test(p);
+          const u = new SpeechSynthesisUtterance(p); u.lang = 'zh-CN'; u.volume = 1;
+          u.rate = Math.min(2, cfg.rate * (0.96 + Math.random() * 0.1) * (excl ? 1.04 : 1));
+          u.pitch = Math.max(0.1, Math.min(2, cfg.pitch + (last ? 0.1 : 0) + (excl ? 0.06 : 0) + (Math.random() - 0.5) * 0.08));
+          if (voice) u.voice = voice;
+          u.onstart = () => { clearTimeout(fallback); show(); };
+          u.onend = () => setTimeout(next, /[。！？.!?]\s*$/.test(p) ? 90 : 10);
+          u.onerror = (ev) => { if (ev && (ev.error === 'interrupted' || ev.error === 'canceled')) return; next(); };
+          speechSynthesis.speak(u);
+        };
+        setTimeout(next, 40);
+        clearTimeout(timer); timer = setTimeout(fin, est + 1500);
+      };
+      if (line.audio) { const a = new Audio(line.audio); curAudio = a; a.onplaying = show; a.onended = fin; a.onerror = tts; a.play().catch(tts); } else tts();
+    }
+    function emote(ui, e) {
+      ['happy', 'puzzled', 'surprised', 'thanks'].forEach((x) => ui.wrap.classList.remove('e-' + x));
+      void ui.wrap.offsetWidth;
+      if (e) ui.wrap.classList.add('e-' + e);
+      const sym = { happy: '♪', puzzled: '？', surprised: '！', thanks: '♥' }[e];
+      if (ui.fx && sym) { ui.fx.textContent = sym; ui.fx.className = 'gm-fx pop ' + e; setTimeout(() => ui.fx && ui.fx.classList.remove('pop'), 2200); }
+    }
+    return { say, stop };
   })();
 
-  /* ---------- 警报（新案件） ---------- */
-  const alarm = h(`<div id="alarm"><svg viewBox="0 0 420 380"><path d="M210 18 L400 350 H20z" fill="#ffd23f" stroke="#c0392b" stroke-width="22" stroke-linejoin="round"/><rect x="195" y="120" width="30" height="130" rx="15" fill="#c0392b"/><circle cx="210" cy="298" r="19" fill="#c0392b"/></svg><h2>${CFG.newCase.title}</h2><div class="acase">${CFG.newCase.text}</div><button class="btn sm" id="alarmClose">收起 ✔</button></div>`);
-  stage.appendChild(alarm);
-  function showAlarm() { alarm.classList.add('on'); Snd.sfx.alarm(3); }
-  function hideAlarm() { alarm.classList.remove('on'); Snd.sfx.alarmStop(); }
-  $('#alarmClose', alarm).addEventListener('click', hideAlarm);
+  /* ============================================================
+     场景 1：开始页
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-start"><div class="blurbg"></div><div class="cover-wrap"><img src="cover.jpg" alt="雨后的线索：校园小侦探"><button class="cover-hit" aria-label="开始调查"></button></div><div class="petals"></div><div class="start-hint">按 F 进入全屏　·　按 J 打开老师菜单</div></section>`);
+    const pet = $('.petals', e);
+    for (let i = 0; i < 18; i++) pet.appendChild(el(`<i class="petal" style="left:${Math.random() * 100}%;--d:${8 + Math.random() * 8}s;--dl:${-Math.random() * 14}s;--s:${14 + Math.random() * 16}px;--c:${['#f4a3b5', '#f7bd7c', '#d9b8ee', '#f8d7e0'][i % 4]}"></i>`));
+    $('.cover-hit', e).onclick = () => { Snd.init(); Snd.click(); go('desk'); };
+    def('start', { el: e });
+  })();
 
-  /* ---------- 工具条、跳转菜单 ---------- */
-  const tb = h(`<div id="toolbar"><button id="tMus" title="音乐 (M)">🎵</button><button id="tSfx" title="音效">🔊</button><button id="tFs" title="全屏 (F)">⛶</button><button id="tMenu" title="跳转菜单 (J)">🧭</button></div>`);
-  stage.appendChild(tb);
-  function syncTools() { $('#tMus').classList.toggle('off', !Snd.music.playing()); $('#tSfx').classList.toggle('off', !Snd.sfxEnabled()); }
-  function toggleMusic() { Snd.init(); if (Snd.music.playing()) Snd.music.off(); else Snd.music.on(); setTimeout(syncTools, 50); }
-  function toggleFS() { const d = document.documentElement; if (!document.fullscreenElement) { (d.requestFullscreen || d.webkitRequestFullscreen || function () { }).call(d); } else document.exitFullscreen(); }
-  $('#tMus').addEventListener('click', toggleMusic);
-  $('#tSfx').addEventListener('click', () => { Snd.init(); Snd.setSfx(!Snd.sfxEnabled()); syncTools(); });
-  $('#tFs').addEventListener('click', toggleFS);
-  const menu = h(`<div id="menu"><div class="mbox"><h2>跳转到……（老师专用）</h2><div class="mgrid"></div><div class="keys"><kbd>→</kbd><kbd>←</kbd> 下一步 / 上一步　<kbd>空格</kbd> 计时器开始/暂停　<kbd>+</kbd><kbd>-</kbd> 计时器加减 1 分钟<br><kbd>1</kbd>–<kbd>9</kbd> 白奶奶台词　<kbd>0</kbd> 挂断 / 打开地图 / 真相揭晓　<kbd>H</kbd> 隐藏按钮　<kbd>M</kbd> 音乐　<kbd>F</kbd> 全屏　<kbd>J</kbd> 本菜单　<kbd>Esc</kbd> 关闭弹窗</div><div style="margin-top:14px;display:flex;gap:14px"><button class="btn sm stop" id="mReset">重新开始（清空线索进度）</button><button class="btn sm" id="mClose">关闭</button></div></div></div>`);
+  /* ============================================================
+     场景 2：书桌（笔记本合上）
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-desk"><img class="fill" src="desk.jpg" alt=""><div class="boardhost"></div><button class="nb-hit" aria-label="翻开侦探笔记"><span class="tip">点我翻开侦探笔记</span></button></section>`);
+    $('.boardhost', e).appendChild(makeBoard());
+    $('.nb-hit', e).onclick = () => { Snd.init(); Snd.page(); e.classList.add('zoom'); setTimeout(() => { go('notebook'); setTimeout(() => e.classList.remove('zoom'), 700); }, 450); };
+    def('desk', { el: e, next() { $('.nb-hit', e).click(); return true; } });
+  })();
+
+  /* ============================================================
+     场景 3：笔记本·案件前情 → 前往现场
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-nb"><img class="fill" src="notebook.jpg" alt="">
+      <div class="nb-go"><div class="nb-go-t">小侦探们，出发！</div><button class="nb-lens" aria-label="前往现场"><i></i></button><button class="btn lg go-scene">前往现场</button></div></section>`);
+    function go2() { Snd.init(); Snd.click(); go('scene'); }
+    $('.go-scene', e).onclick = go2; $('.nb-lens', e).onclick = go2;
+    def('notebook', { el: e, next() { go2(); return true; }, prev() { go('desk'); return true; } });
+  })();
+
+  /* ============================================================
+     场景 4：现场搜证
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-scene"><img class="fill" src="scene.jpg" alt=""><div class="hots"></div>
+      <div class="hud"><div class="hud-t">线索</div><div class="slots"></div><div class="hud-n">0 / 4</div></div>
+      <button class="btn small hintbtn">💡 提示</button><div class="detail"></div></section>`);
+    const hots = $('.hots', e), slots = $('.slots', e), detail = $('.detail', e);
+    const cur = 'url("data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><circle cx="26" cy="26" r="17" fill="#cfeaf2" fill-opacity=".55" stroke="#d6a43e" stroke-width="6"/><path d="M16 20q4-8 12-8" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" opacity=".9"/><path d="M39 39L58 58" stroke="#8a4f2b" stroke-width="9" stroke-linecap="round"/></svg>') + '") 22 22, zoom-in';
+    hots.style.cursor = cur;
+    CFG.clues.forEach((c, i) => {
+      (c.hots || [c.hot]).forEach((h) => hots.appendChild(el(`<button class="hot" data-i="${i}" aria-label="${c.name}" style="left:${(h.x / IW) * 100}%;top:${(h.y / IH) * 100}%;width:${((h.r * 2) / IW) * 100}%;cursor:inherit"><span class="ring"></span><span class="ring r2"></span><span class="chk">✓</span></button>`)));
+      slots.appendChild(el(`<div class="hslot" data-i="${i}"><span>${i + 1}</span></div>`));
+    });
+    function updateHud() {
+      $$('.hslot', e).forEach((s) => { const c = CFG.clues[+s.dataset.i], on = state.found.has(c.id); s.classList.toggle('on', on); if (on && !s.querySelector('.ph')) s.insertAdjacentHTML('beforeend', `<div class="ph" style="${cropStyle(c.crop || c.cropA, 1)}"></div>`); });
+      $$('.hot', e).forEach((h) => h.classList.toggle('found', state.found.has(CFG.clues[+h.dataset.i].id)));
+      $('.hud-n', e).textContent = state.found.size + ' / 4';
+    }
+    function cardHtml(c) {
+      const num = '①②③④'[c.no - 1];
+      const ask = `<div class="dc-ask"><b>想一想：</b>${c.ask.join('　')}</div>`;
+      let media;
+      if (c.id === 'hair') media = `<div class="dc-lens"><div class="lens-img" style="${cropStyle(c.lens || c.crop, 1)}"></div><div class="lens-rim"></div></div><div class="lens-handle"></div>`;
+      else if (c.id === 'prints') media = `<div class="dc-two">${['cropA', 'cropB', 'cropC'].map((k, n) => `${n ? '<div class="vs">VS</div>' : ''}<figure><div class="dc-media sm" style="${cropStyle(c[k], 4 / 3)}"></div><figcaption>脚印 ${'ABC'[n]}</figcaption></figure>`).join('')}</div>`;
+      else if (c.id === 'dew') media = `<div class="dc-media" style="${cropStyle(c.crop, 4 / 3)}">${[[22, 28], [38, 52], [54, 24], [70, 46], [30, 72], [62, 70], [84, 66], [48, 40]].map((p, i) => `<i class="drop" style="left:${p[0]}%;top:${p[1]}%;animation-delay:${i * 0.35}s"></i>`).join('')}</div>`;
+      else media = `<div class="dc-media" style="${cropStyle(c.crop, 4 / 3)}"></div>`;
+      return `<div class="dc c-${c.id}"><div class="tape"></div><h2>线索${num}　${c.name}</h2><div class="dc-body">${media}</div>${ask}<button class="btn dc-close">收好线索</button></div>`;
+    }
+    function open(i) {
+      const c = CFG.clues[i]; Snd.init(); Snd.pop();
+      detail.innerHTML = cardHtml(c); detail.classList.add('on');
+      $('.dc-close', detail).onclick = close;
+      if (!state.found.has(c.id)) { state.found.add(c.id); setTimeout(() => { Snd.ding(); updateHud(); refreshBoards(); }, 350); }
+    }
+    function close() {
+      if (!detail.classList.contains('on')) return false;
+      detail.classList.remove('on'); Snd.click();
+      if (state.found.size === 4 && !state.callShown) { state.callShown = true; setTimeout(() => { if (state.base === 'scene') go('call1'); }, 900); }
+      return true;
+    }
+    $$('.hot', e).forEach((h) => h.onclick = () => open(+h.dataset.i));
+    detail.onclick = (ev) => { if (ev.target === detail) close(); };
+    $('.hintbtn', e).onclick = () => { hots.classList.add('hint'); setTimeout(() => hots.classList.remove('hint'), 2600); Snd.click(); };
+    def('scene', { el: e, enter() { updateHud(); }, close, leave() { detail.classList.remove('on'); }, hasFloater: () => detail.classList.contains('on') });
+  })();
+
+  /* ============================================================
+     白奶奶视频电话（overlay）：call1 / call2
+     ============================================================ */
+  const Call = (function () {
+    const e = el(`<section id="s-call"><div class="call-dim"></div>
+      <div class="call-win"><div class="call-head"><span class="call-name">📞 白奶奶</span><span class="call-time">00:00</span><button class="hang" aria-label="挂断">挂断</button></div>
+        <div class="call-video"><div class="call-bg"></div><div class="rings"><i></i><i></i><i></i></div><div class="gm-wrap"><img class="gm" src="grandma.png" alt="白奶奶"></div><div class="gm-fx"></div>
+          <div class="call-ringtxt">白奶奶来电…</div><button class="btn accept">✔ 接听</button><div class="call-sub"></div></div></div>
+      <div class="call-bar"></div></section>`);
+    const ui = { wrap: $('.gm-wrap', e), fx: $('.gm-fx', e), sub: $('.call-sub', e) };
+    let key = null, live = false, tmr = null, t0 = 0, autoId = null;
+    function lines() { return CFG.grandma[key].lines; }
+    function buildBar() {
+      const bar = $('.call-bar', e); bar.innerHTML = '';
+      lines().forEach((l, i) => { const b = el(`<button class="ln"><i>${i + 1}</i>${l.k}</button>`); b.title = l.t; b.onclick = () => say(i); bar.appendChild(b); });
+      if (key === 'call2') { const b = el(`<button class="ln map"><i>0</i>🗺 校园地图</button>`); b.onclick = openMap; bar.appendChild(b); }
+    }
+    function say(i) { const l = lines()[i]; if (l && live) Voice.say(l, ui); }
+    function open(k, outgoing) {
+      key = k; live = false; clearTimeout(autoId); clearInterval(tmr);
+      e.classList.remove('live'); e.classList.toggle('outgoing', !!outgoing);
+      $('.call-ringtxt', e).textContent = CFG.grandma[k].ring; $('.call-time', e).textContent = '00:00'; ui.sub.classList.remove('on');
+      buildBar(); Snd.init(); Snd.ring(true);
+      if (outgoing) autoId = setTimeout(accept, 2000);
+    }
+    function accept() {
+      if (live) return; clearTimeout(autoId); live = true; Snd.ring(false); Snd.click();
+      e.classList.add('live'); t0 = Date.now();
+      tmr = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $('.call-time', e).textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }, 500);
+      setTimeout(() => Voice.say(CFG.grandma[key].intro, ui), 900);
+    }
+    function stop() { clearTimeout(autoId); clearInterval(tmr); Snd.ring(false); Voice.stop(); live = false; }
+    function hangup() { stop(); Snd.hang(); go(key === 'call1' ? 'group' : 'deskPhone'); }
+    function openMap() { stop(); Snd.click(); go('map'); }
+    $('.accept', e).onclick = accept; $('.hang', e).onclick = hangup;
+    def('call1', { el: e, overlay: true, under: 'scene', enter() { open('call1', false); }, leave() { stop(); } });
+    // call2 与 call1 共用同一个界面
+    SC.call2 = { el: e, overlay: true, under: 'deskPhone', enter() { open('call2', true); }, leave() { stop(); } };
+    return { say, accept, openMap, hangup, isLive: () => live, key: () => key };
+  })();
+
+  /* ============================================================
+     场景 6：小组讨论（书桌 + 老电脑 + CCTV）
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-group"><img class="fill" src="desk_pc.jpg" alt=""><div class="boardhost"></div><div class="pc-over"></div>
+      <div class="ribbon">小组讨论时间</div><div class="timer-host"></div>
+      <button class="pc" aria-label="打开校园监控"><span class="tip">点我打开校园监控</span></button>
+      <button class="btn endbtn">长按 结束讨论 ▶<i></i></button>
+      <div class="cctv"><div class="mon"><div class="mon-screen"><div class="grid"></div><div class="big"><div class="big-in"></div><div class="big-hud"></div><button class="btn small back">◀ 返回监控墙</button></div><div class="scan"></div></div><div class="mon-bar"><span class="led"></span><b>校园监控</b><button class="btn small mon-close">关闭监控</button></div></div></div></section>`);
+    $('.boardhost', e).appendChild(makeBoard());
+    const grid = $('.grid', e), cctv = $('.cctv', e), big = $('.big', e), bigIn = $('.big-in', e);
+    CFG.gridOrder.forEach((r, g) => {
+      const cam = CFG.cams[r];
+      grid.appendChild(el(`<button class="cell" data-r="${r}"><div class="cam-art">${Art.KEY(cam.id)}</div><span class="cam-id">CAM 0${g + 1}</span><span class="cam-time">${cam.time}</span><span class="rec">● REC</span></button>`));
+    });
+    $$('.cell', e).forEach((c) => c.onclick = () => openBig(+c.dataset.r, +$$('.cell', e).indexOf(c)));
+    function openBig(r, g) {
+      const cam = CFG.cams[r]; Snd.static();
+      bigIn.innerHTML = Art.KEY(cam.id); bigIn.classList.remove('zoomed'); bigIn.style.transformOrigin = '50% 50%'; bigIn.style.transform = '';
+      $('.big-hud', e).innerHTML = `<span class="cam-id">CAM 0${g + 1}</span><span class="cam-time">${cam.time}</span><span class="rec">● REC</span><span class="zhint">点一下画面可放大</span>`;
+      big.classList.add('on'); state.cctvSeen.add(r);
+    }
+    bigIn.onclick = () => { bigIn.classList.toggle('zoomed'); bigIn.style.transform = bigIn.classList.contains('zoomed') ? 'scale(2.3)' : ''; Snd.click(); };
+    bigIn.onmousemove = (ev) => { if (!bigIn.classList.contains('zoomed')) return; const r = bigIn.getBoundingClientRect(); bigIn.style.transformOrigin = ((ev.clientX - r.left) / r.width * 100) + '% ' + ((ev.clientY - r.top) / r.height * 100) + '%'; };
+    $('.back', e).onclick = () => { big.classList.remove('on'); Snd.click(); };
+    function openCctv() { Snd.init(); Snd.static(); cctv.classList.add('on'); big.classList.remove('on'); }
+    function closeCctv() { if (!cctv.classList.contains('on')) return false; if (big.classList.contains('on')) { big.classList.remove('on'); return true; } cctv.classList.remove('on'); Snd.click(); return true; }
+    $('.pc', e).onclick = openCctv; $('.mon-close', e).onclick = () => { big.classList.remove('on'); closeCctv(); };
+    longPress($('.endbtn', e), 900, () => { Snd.click(); go('meeting'); });
+    let T = null;
+    def('group', { el: e, music: true, close: closeCctv, hasFloater: () => cctv.classList.contains('on'),
+      enter() { refreshBoards(); if (!T) T = makeTimer($('.timer-host', e), CFG.timers.group); activeTimer = T; },
+      leave() { cctv.classList.remove('on'); big.classList.remove('on'); state.boardAll = true; } });
+  })();
+
+  /* ============================================================
+     场景 7：推理会议（布告栏 + 语言支架卷轴）
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-meet"><img class="fill blur" src="desk.jpg" alt=""><div class="meet-dim"></div>
+      <div class="ribbon">推理会议</div><div class="timer-host"></div>
+      <div class="cork"><svg class="strings" viewBox="0 0 1060 720"></svg><div class="cards"></div></div>
+      <button class="roll" aria-label="展开语言支架"><img src="scroll_closed.png" alt=""><span class="tip">点开卷轴 · 语言支架</span></button>
+      <div class="scroll-panel"><div class="paper"><h3>语言支架</h3><div class="cats"></div></div><button class="btn small sp-close">收起卷轴</button></div>
+      <div class="lightbox"><div class="lb-card"></div></div>
+      <button class="btn endbtn2">结束 ▶</button></section>`);
+    /* 布告栏：上排 4 张线索照片，下排最多 5 张监控照片（CFG.meetCams） */
+    const meetCams = (CFG.meetCams || []).slice(0, 5);
+    const POS = [[8, 34, -2, 'L'], [272, 52, 1.5, 'L'], [536, 30, -1.5, 'L'], [800, 50, 2, 'L']]
+      .concat(meetCams.map((_, k) => [8 + k * 212, 392 + (k % 2 ? 22 : -4), [-2, 1.5, -1, 2, -1.5][k], 'S']));
+    const LAB = ['线索① 折断的花枝', '线索② 神秘的毛发', '线索③ 泥地脚印', '线索④ 叶上露珠'].concat(meetCams.map((r) => '监控 · ' + (CFG.camNames[CFG.cams[r].id] || '')));
+    const cards = $('.cards', e);
+    POS.forEach((p, i) => {
+      let inner;
+      if (i < 4) { const c = CFG.clues[i]; inner = `<div class="ph" style="${cropStyle(c.crop || c.cropA, 4 / 3)}"></div>`; }
+      else inner = `<div class="ph">${Art.KEY(CFG.cams[meetCams[i - 4]].id)}</div>`;
+      const pin = ['#e57a8a', '#7fa6d6', '#9b8bc8', '#e0a63c', '#e57a8a', '#7fa6d6', '#e0a63c', '#79bf86', '#e57a8a'][i];
+      const d = el(`<button class="pc2 ${p[3] === 'S' ? 'sm' : ''}" data-i="${i}" style="left:${p[0]}px;top:${p[1]}px;--rot:${p[2]}deg"><i class="pin" style="background:${pin}"></i>${inner}<span class="lab">${LAB[i]}</span></button>`);
+      d.onclick = () => zoom(i); cards.appendChild(d);
+    });
+    // 红线
+    const pts = POS.map((p) => [p[0] + (p[3] === 'S' ? 100 : 125), p[1] + 12]);
+    const links = [[0, 1], [1, 2], [2, 3], [0, 4], [1, 5], [2, 6], [3, 7], [4, 5], [5, 6], [6, 7], [7, 8], [3, 8]].filter(([a, b]) => pts[a] && pts[b]);
+    $('.strings', e).innerHTML = links.map(([a, b]) => `<path d="M${pts[a][0]} ${pts[a][1]} Q${(pts[a][0] + pts[b][0]) / 2} ${(pts[a][1] + pts[b][1]) / 2 + 40} ${pts[b][0]} ${pts[b][1]}" stroke="#c4474f" stroke-width="3.2" fill="none" opacity=".85"/>`).join('');
+    const lb = $('.lightbox', e), lbc = $('.lb-card', e);
+    function zoom(i) {
+      Snd.pop();
+      let inner;
+      if (i < 4) { const c = CFG.clues[i]; inner = c.id === 'prints' ? `<div class="lb-two">${['cropA', 'cropB', 'cropC'].map((k) => `<div class="ph" style="${cropStyle(c[k], 4 / 3)}"></div>`).join('')}</div>` : `<div class="ph big" style="${cropStyle(c.crop, 4 / 3)}"></div>`; }
+      else inner = `<div class="ph big cam-ph">${Art.KEY(CFG.cams[meetCams[i - 4]].id)}</div>`;
+      lbc.innerHTML = inner + `<div class="lb-lab">${LAB[i]}</div>`; lb.classList.add('on');
+    }
+    lb.onclick = () => lb.classList.remove('on');
+    const CATS = [['提出问题', '#8fb9d9', ['请问……？', '为什么……？', '这些线索说明了什么？']], ['表达推测', '#9cc79a', ['我认为……，因为……']], ['表示同意', '#e9c96a', ['我同意你的看法，因为……']],
+      ['补充意见', '#f0a86a', ['我想补充一点……']], ['提出质疑', '#e88fa0', ['可是，我想知道……', '如果……，为什么……？']], ['礼貌回应', '#b9a3dc', ['谢谢你的意见。', '不好意思，我有不同的看法。']]];
+    $('.cats', e).innerHTML = CATS.map((c) => `<div class="cat" style="--c:${c[1]}"><b>${c[0]}</b>${c[2].map((s) => `<p>${s}</p>`).join('')}</div>`).join('');
+    $$('.cat', e).forEach((c) => c.onclick = () => { const on = c.classList.contains('spot'); $$('.cat', e).forEach((x) => x.classList.remove('spot')); $('.cats', e).classList.toggle('dim', !on); if (!on) c.classList.add('spot'); Snd.click(); });
+    const panel = $('.scroll-panel', e);
+    function openScroll() { Snd.page(); panel.classList.add('on'); e.classList.add('rolled'); }
+    function closeScroll() { if (!panel.classList.contains('on')) return false; panel.classList.remove('on'); e.classList.remove('rolled'); Snd.page(); return true; }
+    $('.roll', e).onclick = openScroll; $('.sp-close', e).onclick = closeScroll;
+    $('.endbtn2', e).onclick = () => { Snd.click(); go('deskPhone'); };
+    let T = null;
+    def('meeting', { el: e, music: true, close() { if (lb.classList.contains('on')) { lb.classList.remove('on'); return true; } return closeScroll(); }, hasFloater: () => lb.classList.contains('on') || panel.classList.contains('on'),
+      enter() { if (!T) T = makeTimer($('.timer-host', e), CFG.timers.meeting); activeTimer = T; }, leave() { closeScroll(); lb.classList.remove('on'); } });
+  })();
+
+  /* ============================================================
+     场景 8a：书桌 · 手机
+     ============================================================ */
+  (function () {
+    const P = (x, y) => [x * 1920 / 1376, y * 1080 / 768];
+    const e = el(`<section id="s-dphone"><img class="fill" src="desk_phone.jpg" alt=""><div class="boardhost"></div>
+      <div class="ribbon small">案件有线索了！给白奶奶打个电话吧</div>
+      <div class="pfx"><div class="pfx-img"></div><div class="pscreen"><div class="ps-waves"><i></i><i></i></div><div class="ps-top">视频来电</div><div class="ps-face"><img src="grandma.png" alt=""></div><div class="ps-name">白奶奶</div><div class="ps-sub">邀请你视频通话…</div><div class="ps-btns"><span class="no">✕</span><span class="yes">📞</span></div></div></div>
+      <button class="phone" aria-label="接听白奶奶的视频电话"><span class="tip">点我接听白奶奶的电话</span></button></section>`);
+    $('.boardhost', e).appendChild(makeBoard());
+    $('.pscreen', e).style.transform = quadMatrix(220, 440, [P(958, 236), P(1046, 250), P(1026, 452), P(932, 440)]);
+    let buzzes = 0, bt = null;
+    function buzzLoop() { if (state.cur !== 'deskPhone' || buzzes >= 4) return; buzzes++; Snd.buzz(); bt = setTimeout(buzzLoop, 2600); }
+    $('.phone', e).onclick = () => { Snd.init(); Snd.click(); clearTimeout(bt); e.classList.add('zoomp'); setTimeout(() => { go('call2'); setTimeout(() => e.classList.remove('zoomp'), 700); }, 450); };
+    def('deskPhone', { el: e, enter() { state.boardAll = true; refreshBoards(); buzzes = 0; clearTimeout(bt); bt = setTimeout(buzzLoop, 900); }, leave(nx) { if (nx !== 'call2') clearTimeout(bt); }, next() { $('.phone', e).click(); return true; } });
+  })();
+
+  /* ============================================================
+     场景 8c：校园地图
+     ============================================================ */
+  (function () {
+    const N = Art.MAP_NODES, ED = Art.MAP_EDGES;
+    const e = el(`<section id="s-map"><div class="map-zoom"><div class="map-art"></div>
+        <svg class="trail" viewBox="0 0 1920 1080"><polyline points="" /></svg><div class="markers"></div><div class="walker"><img src="grandma.png" alt=""></div><button class="hole" aria-label="小洞口"><i></i><span>发现小洞口！</span></button></div>
+      <div class="map-card"><b>请你们指引白奶奶</b>白奶奶在花园。她应该往哪里走？</div>
+      <div class="pip"><div class="gm-wrap"><img class="gm" src="grandma.png" alt=""></div><div class="gm-fx"></div></div><div class="call-sub map-sub"></div>
+      <div class="call-bar mapbar"></div><button class="btn small rbtn">真相揭晓 ▶</button></section>`);
+    $('.map-art', e).innerHTML = Art.map();
+    const markers = $('.markers', e), walker = $('.walker', e), trail = $('.trail polyline', e), hole = $('.hole', e);
+    const ui = { wrap: $('.pip .gm-wrap', e), fx: $('.pip .gm-fx', e), sub: $('.map-sub', e) };
+    let at = 'G', moving = false, trailPts = [];
+    Object.keys(N).forEach((k) => { if (!N[k].n) return; const m = el(`<button class="mk" data-k="${k}" style="left:${N[k].x}px;top:${N[k].y}px" aria-label="${N[k].n}"><i></i></button>`); m.onclick = () => walkTo(k); markers.appendChild(m); });
+    function place(k) { walker.style.left = N[k].x + 'px'; walker.style.top = N[k].y + 'px'; }
+    function path(a, b) {
+      const q = [[a]], seen = new Set([a]);
+      while (q.length) { const p = q.shift(), last = p[p.length - 1]; if (last === b) return p; ED.forEach(([x, y]) => { const nx = x === last ? y : (y === last ? x : null); if (nx && !seen.has(nx)) { seen.add(nx); q.push(p.concat(nx)); } }); }
+      return [a];
+    }
+    function walkTo(k) {
+      if (moving || k === at) return; Snd.init(); const route = path(at, k); moving = true; walker.classList.add('walk'); hole.classList.remove('on');
+      const pts = route.map((r) => N[r]), lens = [0];
+      for (let n = 1; n < pts.length; n++) lens.push(lens[n - 1] + Math.hypot(pts[n].x - pts[n - 1].x, pts[n].y - pts[n - 1].y));
+      const total = lens[lens.length - 1], dur = Math.max(500, total / 0.85), t0 = performance.now(); let lastStep = -999;
+      (function f(t) {
+        const p = Math.min(1, (t - t0) / dur), d = total * (p < .5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2) * 0.35 + total * p * 0.65; // 起步/收步稍缓，中间匀速，整体偏快
+        let n = 1; while (n < lens.length - 1 && lens[n] < d) n++;
+        const a = pts[n - 1], b = pts[n], seg = lens[n] - lens[n - 1] || 1, u = Math.min(1, Math.max(0, (d - lens[n - 1]) / seg));
+        const x = a.x + (b.x - a.x) * u, y = a.y + (b.y - a.y) * u;
+        walker.style.left = x + 'px'; walker.style.top = y + 'px'; trailPts.push(x.toFixed(0) + ',' + y.toFixed(0)); if (trailPts.length % 2 === 0) trail.setAttribute('points', trailPts.join(' '));
+        if (t - lastStep > 260) { Snd.step(); lastStep = t; }
+        if (p < 1) requestAnimationFrame(f); else { at = k; moving = false; walker.classList.remove('walk'); place(k); arrive(k); }
+      })(t0);
+    }
+    const ARRIVE = { K: '这里没有脚印，也没有猫爪印……线索好像中断了！', P: '脚印淡得几乎看不见了，只剩下花瓣……', W: '请问，这里有什么发现吗？' };
+    function arrive(k) {
+      trail.setAttribute('points', trailPts.join(' '));
+      $('.map-card', e).innerHTML = `<b>白奶奶到了「${N[k].n}」</b>${ARRIVE[k] || '请问，这里有什么发现吗？'}`; Snd.ding();
+      if (k === 'W') { hole.classList.add('on'); }
+    }
+    function discover() {
+      hole.classList.remove('on'); Snd.pop();
+      Voice.say(CFG.grandma.map.lines[5], ui);
+      const z = $('.map-zoom', e); z.style.transformOrigin = '1790px 235px'; z.classList.add('dive');
+      setTimeout(() => { Snd.whoosh(); }, 1100);
+      setTimeout(() => { go('reveal'); setTimeout(() => z.classList.remove('dive'), 800); }, 2600);
+    }
+    hole.onclick = discover; $('.rbtn', e).onclick = discover;
+    const bar = $('.mapbar', e);
+    CFG.grandma.map.lines.forEach((l, i) => { const b = el(`<button class="ln"><i>${i + 1}</i>${l.k}</button>`); b.title = l.t; b.onclick = () => Voice.say(l, ui); bar.appendChild(b); });
+    def('map', { el: e, discover, leave() { Voice.stop(); },
+      enter(prev) { if (prev === 'call2' || prev === 'deskPhone' || !trailPts.length) { at = 'G'; trailPts = []; trail.setAttribute('points', ''); place('G'); hole.classList.remove('on'); $('.map-card', e).innerHTML = '<b>请你们指引白奶奶</b>白奶奶在花园。她应该往哪里走？'; } },
+      lineKey(n) { const l = CFG.grandma.map.lines[n - 1]; if (l) Voice.say(l, ui); } });
+    place('G');
+  })();
+
+  /* ============================================================
+     场景 8d：真相揭晓时刻（全屏视频）
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-reveal"><video playsinline preload="auto"></video><div class="rv-holder"></div><div class="rv-title">真相揭晓时刻</div><button class="skip">跳过 ▶</button></section>`);
+    const v = $('video', e), holder = $('.rv-holder', e); let phTimer = null, usingPh = false;
+    function finish() { clearTimeout(phTimer); if (state.cur === 'reveal') go('review'); }
+    function placeholder() {
+      if (usingPh) return; usingPh = true; v.style.display = 'none'; holder.innerHTML = Art.revealPlaceholder(); holder.classList.add('on');
+      void holder.offsetWidth; holder.classList.add('run'); Snd.whoosh(); phTimer = setTimeout(finish, 12500);
+    }
+    v.addEventListener('error', placeholder); v.addEventListener('ended', finish);
+    $('.skip', e).onclick = finish;
+    def('reveal', { el: e,
+      enter() {
+        usingPh = false; holder.classList.remove('on', 'run'); holder.innerHTML = ''; v.style.display = '';
+        v.src = CFG.revealVideo; v.currentTime = 0; v.muted = false;
+        const p = v.play(); if (p && p.catch) p.catch((err) => { if (err && err.name !== 'NotAllowedError' && err.name !== 'AbortError') placeholder(); else { v.muted = true; v.play().catch(placeholder); } });
+        clearTimeout(phTimer); phTimer = setTimeout(() => { if (!usingPh && (v.readyState < 2)) placeholder(); }, 2500);
+      },
+      leave() { v.pause(); clearTimeout(phTimer); holder.classList.remove('on', 'run'); },
+      next() { finish(); return true; } });
+  })();
+
+  /* ============================================================
+     场景 9：笔记本回顾 · 盖章 · 新案件警报
+     ============================================================ */
+  (function () {
+    const e = el(`<section id="s-review"><div class="rv-desk"><img class="fill" src="desk.jpg" alt=""><div class="boardhost"></div></div>
+      <div class="rv-nb"><img class="fill" src="notebook_blank.jpg" alt=""><div class="pg pgl"></div><div class="pg pgr"></div><div class="rv-pagen"></div>
+        <button class="arr arr-l" aria-label="上一页"></button><button class="arr arr-r" aria-label="下一页"></button></div>
+      <div class="alarm"><svg viewBox="0 0 420 380"><path d="M210 18 L400 350 H20z" fill="#ffd23f" stroke="#c0392b" stroke-width="22" stroke-linejoin="round"/><rect x="195" y="120" width="30" height="130" rx="15" fill="#c0392b"/><circle cx="210" cy="298" r="19" fill="#c0392b"/></svg><h2></h2><div class="acase"></div><button class="btn small al-close">收起 ✔</button></div><div class="confetti"></div></section>`);
+    $('.boardhost', e).appendChild(makeBoard());
+    const stampEl = el('<div class="stamp">破案<br>成功</div>'); $('.rv-nb', e).appendChild(stampEl);
+    const L = $('.pgl', e), R = $('.pgr', e), nb = $('.rv-nb', e), pn = $('.rv-pagen', e);
+    const NUM = '①②③④';
+    const spreads = [];
+    CFG.clues.forEach((c, i) => spreads.push({
+      l: `<div class="polaroid"><div class="ph" style="${cropStyle(c.crop || c.cropA, 4 / 3)}"></div></div><h4>线索${NUM[i]}<br>${c.name}</h4>`,
+      r: `<div class="solved">已解开 ✓</div><p class="note">${c.truth}</p>`
+    }));
+    const routeNames = ['花园', '走廊', '小卖部', '图书馆', '篮球场', '升旗台', '操场', '体育馆', '体育馆旁小路'];
+    const mini = `<div class="mini"><div class="mini-map">${Art.map()}${Art.miniRoutes()}</div></div>`;
+    spreads.push({ l: mini + '<h4>脚印和花瓣<br>留下的路线</h4>', r: `<div class="solved">已解开 ✓</div><p class="note"><b class="cb">红色</b>猫爪印：一路走到体育馆旁的小路和石墙。<br><b class="cbl">蓝色</b>雨靴印：在食堂中断了。</p>` });
+    spreads.push({ l: `<div class="polaroid"><div class="ph cam-ph"><img class="truth-img" src="truth.jpg" alt="" onerror="this.outerHTML=window.Art.truth()"></div></div><h4>真相大白</h4>`, r: `<div class="solved">已解开 ✓</div><p class="note">是叔叔养的黑猫和橘猫，从石墙的小洞钻过来，偷吃了百日菊！</p>` });
+    spreads.push({ l: `<div style="font-family:var(--display);font-size:54px;margin-top:70px;text-align:center;color:#4c6a86">恭喜你们！</div><div style="text-align:center;margin-top:30px;font-size:32px;line-height:1.35">小侦探们<br>成功破案啦！<br>你们会提问、会推理、<br>也会礼貌地交流。</div>`, r: `<div style="margin-top:318px;font-size:30px">了不起的小侦探！</div>`, stamp: true });
+    let idx = 0;
+    function render() {
+      const s = spreads[idx]; L.innerHTML = s.l; R.innerHTML = s.r; pn.textContent = (idx + 1) + ' / ' + spreads.length;
+      e.dataset.last = idx === spreads.length - 1 ? '1' : '0';
+      stampEl.classList.remove('on'); stampEl.style.opacity = 0; $('.confetti', e).innerHTML = ''; if (s.stamp) setTimeout(() => { if (state.cur !== 'review' || idx !== spreads.length - 1) return; stampEl.style.opacity = ''; stampEl.classList.add('on'); Snd.stamp(); setTimeout(burst, 450); }, 800);
+    }
+    function burst() { const c = $('.confetti', e); for (let i = 0; i < 30; i++) c.appendChild(el(`<i class="petal" style="left:${Math.random() * 100}%;--d:${6 + Math.random() * 6}s;--dl:${-Math.random() * 3}s;--s:${16 + Math.random() * 18}px;--c:${['#f4a3b5', '#f7bd7c', '#d9b8ee', '#f8d7e0'][i % 4]}"></i>`)); }
+    function forward() { if (idx < spreads.length - 1) { peel(nb, () => { idx++; render(); }); } else alarm(); }
+    function backward() { if (idx > 0) peel(nb, () => { idx--; render(); }, 'back'); }
+    const al = $('.alarm', e);
+    function alarm() {
+      if (al.classList.contains('on')) return; $('h2', al).textContent = CFG.newCase.title; $('.acase', al).textContent = CFG.newCase.text;
+      al.classList.add('on'); Snd.alarm(3.4);
+    }
+    function closeAlarm() { if (!al.classList.contains('on')) return false; al.classList.remove('on'); return true; }
+    $('.al-close', e).onclick = closeAlarm;
+    $('.arr-r', e).onclick = forward; $('.arr-l', e).onclick = backward;
+    function openNb() { e.classList.add('open'); Snd.page(); }
+    $('.rv-desk', e).onclick = openNb;
+    let openTimer = null;
+    def('review', { el: e, close: closeAlarm, hasFloater: () => al.classList.contains('on'),
+      enter() { idx = 0; e.classList.remove('open'); al.classList.remove('on'); render(); refreshBoards(); clearTimeout(openTimer); openTimer = setTimeout(openNb, 1800); },
+      leave() { clearTimeout(openTimer); },
+      next() { if (!e.classList.contains('open')) { openNb(); return true; } forward(); return true; }, prev() { if (e.classList.contains('open')) { backward(); return true; } return false; } });
+  })();
+
+  /* ============================================================
+     工具栏、老师菜单、快捷键
+     ============================================================ */
+  const tool = el(`<div class="toolbar"><button data-a="music" title="背景音乐 (M)">🎵</button><button data-a="sfx" title="音效">🔊</button><button data-a="fs" title="全屏 (F)">⛶</button><button data-a="menu" title="老师菜单 (J)">🧭</button></div>`);
+  stage.appendChild(tool);
+  function syncTool() { const m = $('[data-a=music]', tool), s = $('[data-a=sfx]', tool); if (m) m.classList.toggle('off', !Snd.isMusic()); if (s) s.classList.toggle('off', !Snd.isSfx()); }
+  const menu = el(`<div class="menu"><div class="menu-card"><h2>老师菜单</h2><div class="menu-list"></div><div class="menu-keys"><b>快捷键</b>　→ 下一步　← 上一步　J 菜单　F 全屏　M 音乐　空格 计时开始/暂停　＋ / − 加减 1 分钟　1–9 白奶奶台词　0 打开地图　H 隐藏台词按钮　R 真相揭晓（地图）　Esc 关闭弹窗</div><div class="menu-act"><button class="btn small" data-a="reset">重置全部进度</button><button class="btn small" data-a="close">关闭</button></div></div></div>`);
   stage.appendChild(menu);
-  const mg = $('.mgrid', menu);
-  ORDER.forEach(([id, name]) => { const b = document.createElement('button'); b.textContent = name; b.dataset.id = id; mg.appendChild(b); });
-  mg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; closeMenu(); hideAlarm(); const ti = ids.indexOf(b.dataset.id); if (ti > ids.indexOf('scene')) { CFG.clues.forEach(c => state.found.add(c.id)); state.boardLevel = Math.max(state.boardLevel, ti > ids.indexOf('group') ? 7 : 4); } go(b.dataset.id); });
-  function openMenu() { $$('button', mg).forEach(b => b.classList.toggle('cur', b.dataset.id === state.cur)); menu.classList.add('on'); }
-  function closeMenu() { menu.classList.remove('on'); }
-  $('#mClose', menu).addEventListener('click', closeMenu); $('#mReset', menu).addEventListener('click', () => location.reload()); $('#tMenu').addEventListener('click', openMenu);
-
-  /* ---------- 键盘 ---------- */
-  document.addEventListener('keydown', e => {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    Snd.init(); const k = e.key;
-    if (menu.classList.contains('on')) { if (k === 'Escape' || k === 'j' || k === 'J') closeMenu(); return; }
-    if (alarm.classList.contains('on')) { if (k === 'Escape' || k === 'Enter' || k === ' ') { hideAlarm(); e.preventDefault(); } return; }
-    if (k === 'j' || k === 'J') { openMenu(); return; }
-    if (k === 'f' || k === 'F') { toggleFS(); return; }
-    if (k === 'm' || k === 'M') { toggleMusic(); return; }
-    const S = scenes[state.cur];
-    if (S && S.key && S.key(e)) { e.preventDefault(); return; }
-    if (k === 'ArrowRight') { e.preventDefault(); next(); } else if (k === 'ArrowLeft') { e.preventDefault(); prevScene(); }
+  ORDER.forEach((id) => { const b = el(`<button class="btn small">${NAMES[id]}</button>`); b.onclick = () => { menu.classList.remove('on'); Snd.init(); go(id); }; $('.menu-list', menu).appendChild(b); });
+  $('[data-a=close]', menu).onclick = () => menu.classList.remove('on');
+  $('[data-a=reset]', menu).onclick = () => { state.found.clear(); state.boardAll = false; state.callShown = false; state.cctvSeen.clear(); $$('.hslot').forEach((s) => { s.classList.remove('on'); const p = $('.ph', s); if (p) p.remove(); }); refreshBoards(); menu.classList.remove('on'); go('start'); };
+  tool.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button'); if (!b) return; Snd.init();
+    const a = b.dataset.a;
+    if (a === 'music') toggleMusic(); else if (a === 'sfx') { Snd.setSfx(!Snd.isSfx()); syncTool(); } else if (a === 'fs') toggleFS(); else if (a === 'menu') menu.classList.toggle('on');
   });
-  document.addEventListener('pointerdown', () => Snd.init(), { once: true });
+  function toggleFS() { const d = document.documentElement; if (!document.fullscreenElement) { (d.requestFullscreen || d.webkitRequestFullscreen || function () { }).call(d); } else document.exitFullscreen && document.exitFullscreen(); }
+  function closeFloaters() { menu.classList.remove('on'); }
+  function closeTop() {
+    if (menu.classList.contains('on')) { menu.classList.remove('on'); return; }
+    const sc = SC[state.cur]; if (sc && sc.close && sc.close()) return;
+    const base = SC[state.base]; if (base && base !== sc && base.close) base.close();
+  }
+  addEventListener('keydown', (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = ev.key;
+    if (k === 'j' || k === 'J') { menu.classList.toggle('on'); }
+    else if (k === 'f' || k === 'F') toggleFS();
+    else if (k === 'm' || k === 'M') toggleMusic();
+    else if (k === 'h' || k === 'H') document.body.classList.toggle('bars-hidden');
+    else if (k === 'ArrowRight') { ev.preventDefault(); Snd.init(); if (state.cur === 'scene' && SC.scene.hasFloater()) return; next(); }
+    else if (k === 'ArrowLeft') { ev.preventDefault(); prev(); }
+    else if (k === ' ') { ev.preventDefault(); if (activeTimer && (state.base === 'group' || state.base === 'meeting')) activeTimer.toggle(); }
+    else if (k === '+' || k === '=') { if (activeTimer && (state.base === 'group' || state.base === 'meeting')) activeTimer.add(60); }
+    else if (k === '-' || k === '_') { if (activeTimer && (state.base === 'group' || state.base === 'meeting')) activeTimer.add(-60); }
+    else if (k === 'Escape') closeTop();
+    else if (k === 'Enter') { if (state.cur === 'call1' || state.cur === 'call2') Call.accept(); }
+    else if (k === 'r' || k === 'R') { if (state.cur === 'map') SC.map.discover(); }
+    else if (/^[0-9]$/.test(k)) {
+      const n = +k;
+      if (state.cur === 'call1' || state.cur === 'call2') { if (n === 0 && state.cur === 'call2') Call.openMap(); else if (n > 0) Call.say(n - 1); }
+      else if (state.cur === 'map' && n > 0) SC.map.lineKey(n);
+    }
+  });
+  addEventListener('pointerdown', () => Snd.init(), { once: true });
 
-  /* ---------- 缩放到窗口 ---------- */
-  function fit() { const vp = $('#viewport'), s = Math.min(vp.clientWidth / 1920, vp.clientHeight / 1080); stage.style.transform = `translate(-50%,-50%) scale(${s})`; }
-  window.addEventListener('resize', fit); fit();
-
-  Voice.init();
+  syncTool();
   go('start');
-  window.__go = go; window.__state = state; window.__ids = ids;
+  window.__app = { go, state, SC };
 })();
